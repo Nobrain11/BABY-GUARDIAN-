@@ -12,6 +12,10 @@ model Group {
   telegramId         String   @unique
   title              String?
 
+  // --------------------------------------------------
+  // GROUP MANAGEMENT
+  // --------------------------------------------------
+
   welcomeEnabled     Boolean  @default(true)
   antiSpamEnabled    Boolean  @default(true)
   antiLinksEnabled   Boolean  @default(true)
@@ -24,17 +28,64 @@ model Group {
   maxWarnings        Int      @default(3)
 
   welcomeMessage     String   @default("🍼💚 Welcome to BABY! Please read /rules.")
-  rules              String   @default("🍼💚 BABY COMMUNITY RULES\n\n1. No scams.\n2. No spam.\n3. No phishing links.\n4. No impersonation.\n5. Respect everyone.")
 
-  blockedWords       String   @default("free eth,double your,send eth,send crypto,claim reward,airdrop now,connect wallet")
+  rules              String   @default(
+    "🍼💚 BABY COMMUNITY RULES\n\n1. No scams.\n2. No spam.\n3. No phishing links.\n4. No impersonation.\n5. Respect everyone."
+  )
+
+  blockedWords       String   @default(
+    "free eth,double your,send eth,send crypto,claim reward,airdrop now,connect wallet"
+  )
+
+  // --------------------------------------------------
+  // BUY BOT
+  // --------------------------------------------------
+
+  buyBotEnabled      Boolean  @default(false)
+
+  // Minimum native-coin value required
+  // before a buy alert is sent.
+  buyBotMinEth       Float    @default(0.1)
+
+  // Buy amount at which the alert becomes
+  // a whale alert.
+  buyBotWhaleEth     Float    @default(2.0)
+
+  // Display buyer wallet in Telegram.
+  buyBotShowWallet   Boolean  @default(true)
+
+  // Display USD value when a real price
+  // source is available.
+  buyBotShowUsd      Boolean  @default(true)
+
+  // Display transaction link.
+  buyBotShowTx       Boolean  @default(true)
+
+  // Display the BABY token amount.
+  buyBotShowTokenAmount Boolean @default(true)
+
+  // Display the native token amount.
+  buyBotShowNativeAmount Boolean @default(true)
+
+  // Only announce confirmed transactions.
+  buyBotConfirmations Int      @default(1)
+
+  // --------------------------------------------------
+  // TIMESTAMPS
+  // --------------------------------------------------
 
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
+
+  // --------------------------------------------------
+  // RELATIONS
+  // --------------------------------------------------
 
   members            Member[]
   warnings           Warning[]
   logs               AuditLog[]
   events             GroupEvent[]
+  buyAlerts          BuyAlert[]
 }
 
 model Member {
@@ -56,12 +107,17 @@ model Member {
   joinedAt      DateTime  @default(now())
   lastMessageAt DateTime?
 
-  group         Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group         Group     @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   warningsLog   Warning[]
 
   @@unique([groupId, telegramId])
   @@index([groupId])
+  @@index([telegramId])
 }
 
 model Warning {
@@ -75,10 +131,21 @@ model Warning {
 
   createdAt   DateTime @default(now())
 
-  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  member      Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  group       Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  member      Member   @relation(
+    fields: [memberId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId])
+  @@index([memberId])
+  @@index([groupId, createdAt])
 }
 
 model AuditLog {
@@ -94,9 +161,14 @@ model AuditLog {
 
   createdAt DateTime @default(now())
 
-  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group     Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId, createdAt])
+  @@index([action])
 }
 
 model GroupEvent {
@@ -110,7 +182,65 @@ model GroupEvent {
 
   createdAt   DateTime @default(now())
 
-  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group       Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId, createdAt])
+  @@index([type])
+}
+
+model BuyAlert {
+  id              String   @id @default(cuid())
+
+  // Telegram group that received the alert.
+  groupId         String
+
+  // Blockchain transaction.
+  txHash          String
+
+  // Block containing the transaction.
+  blockNumber     BigInt
+
+  // Buyer wallet.
+  buyer            String
+
+  // Amount of BABY purchased.
+  tokenAmount      Decimal  @db.Decimal(78, 18)
+
+  // Native coin spent.
+  nativeAmount     Decimal  @db.Decimal(78, 18)
+
+  // Optional USD value from a real price feed.
+  usdValue         Decimal? @db.Decimal(30, 8)
+
+  // Whether this was classified as a whale.
+  isWhale          Boolean  @default(false)
+
+  // Telegram message ID after posting.
+  telegramMessageId Int?
+
+  // Confirmation state.
+  confirmed        Boolean  @default(false)
+
+  createdAt        DateTime @default(now())
+  confirmedAt      DateTime?
+
+  group            Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  // A transaction should only generate
+  // one alert per Telegram group.
+  @@unique([groupId, txHash])
+
+  @@index([groupId, createdAt])
+  @@index([txHash])
+  @@index([buyer])
+  @@index([blockNumber])
+  @@index([isWhale])
 }
