@@ -3,27 +3,30 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "description": "BABY Robinhood Chain Telegram Group Manager and Buy Bot",
+  "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "db:generate": "prisma generate",
-    "db:push": "prisma db push",
-    "db:migrate": "prisma migrate dev",
-    "db:studio": "prisma studio"
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate deploy",
+    "prisma:studio": "prisma studio"
   },
   "dependencies": {
-    "@prisma/client": "^6.14.0",
-    "dotenv": "^16.6.1",
-    "express": "^5.1.0",
+    "@prisma/client": "^6.19.0",
+    "dotenv": "^17.2.1",
+    "ethers": "^6.15.0",
     "ioredis": "^5.7.0",
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
-    "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
-    "prisma": "^6.14.0",
+    "prisma": "^6.19.0",
     "tsx": "^4.20.3",
     "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }
