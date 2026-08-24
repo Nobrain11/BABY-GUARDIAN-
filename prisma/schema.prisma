@@ -1,0 +1,116 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Group {
+  id                 String   @id @default(cuid())
+  telegramId         String   @unique
+  title              String?
+
+  welcomeEnabled     Boolean  @default(true)
+  antiSpamEnabled    Boolean  @default(true)
+  antiLinksEnabled   Boolean  @default(true)
+  antiRaidEnabled    Boolean  @default(true)
+
+  lockdown           Boolean  @default(false)
+
+  maxMessages        Int      @default(6)
+  floodWindowSec     Int      @default(5)
+  maxWarnings        Int      @default(3)
+
+  welcomeMessage     String   @default("🍼💚 Welcome to BABY! Please read /rules.")
+  rules              String   @default("🍼💚 BABY COMMUNITY RULES\n\n1. No scams.\n2. No spam.\n3. No phishing links.\n4. No impersonation.\n5. Respect everyone.")
+
+  blockedWords       String   @default("free eth,double your,send eth,send crypto,claim reward,airdrop now,connect wallet")
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  members            Member[]
+  warnings           Warning[]
+  logs               AuditLog[]
+  events             GroupEvent[]
+}
+
+model Member {
+  id            String    @id @default(cuid())
+
+  groupId       String
+  telegramId    String
+
+  username      String?
+  firstName     String?
+  lastName      String?
+
+  role          String    @default("member")
+
+  warnings      Int       @default(0)
+  xp            Int       @default(0)
+  messages      Int       @default(0)
+
+  joinedAt      DateTime  @default(now())
+  lastMessageAt DateTime?
+
+  group         Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  warningsLog   Warning[]
+
+  @@unique([groupId, telegramId])
+  @@index([groupId])
+}
+
+model Warning {
+  id          String   @id @default(cuid())
+
+  groupId     String
+  memberId    String
+
+  reason      String
+  moderatorId String?
+
+  createdAt   DateTime @default(now())
+
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  member      Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+
+  @@index([groupId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+
+  groupId   String
+
+  actorId   String?
+  targetId  String?
+
+  action    String
+  details   String?
+
+  createdAt DateTime @default(now())
+
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+}
+
+model GroupEvent {
+  id          String   @id @default(cuid())
+
+  groupId     String
+
+  type        String
+  telegramId  String?
+  payload     String?
+
+  createdAt   DateTime @default(now())
+
+  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, createdAt])
+}
