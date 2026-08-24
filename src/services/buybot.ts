@@ -1,18 +1,20 @@
-// src/services/buybot.ts
-
 import { ethers } from "ethers";
 import { prisma } from "../db.js";
 import { config } from "../config.js";
 
-type BotLike = {
-  telegram?: {
-    sendMessage?: (
-      chatId: string | number,
-      text: string,
-      options?: Record<string, unknown>
-    ) => Promise<unknown>;
-  };
+type TelegramLike = {
+  sendMessage: (
+    chatId: string | number,
+    text: string,
+    options?: Record<string, unknown>
+  ) => Promise<unknown>;
 };
+
+type BotLike = {
+  telegram?: TelegramLike;
+};
+
+type TelegramOrBot = TelegramLike | BotLike;
 
 type BuyBotSettings = {
   enabled: boolean;
@@ -47,14 +49,15 @@ const ERC20_TRANSFER_TOPIC = ethers.id(
 let provider: ethers.JsonRpcProvider | null = null;
 let watcherTimer: NodeJS.Timeout | null = null;
 let watcherRunning = false;
-
 let lastProcessedBlock: number | null = null;
 
-const botRegistry = new Map<string, BotLike>();
+const botRegistry = new Map<string, TelegramLike>();
 
 function getProvider(): ethers.JsonRpcProvider {
   if (!provider) {
-    provider = new ethers.JsonRpcProvider(config.robinhoodRpcUrl);
+    provider = new ethers.JsonRpcProvider(
+      config.robinhoodRpcUrl
+    );
   }
 
   return provider;
@@ -72,42 +75,79 @@ function normalizeAddress(value: string): string {
   }
 }
 
-function formatEth(value: bigint): string {
-  const eth = Number(ethers.formatEther(value));
+function shortenAddress(address: string): string {
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
 
-  if (!Number.isFinite(eth)) {
+function formatEth(value: bigint): string {
+  const amount = Number(ethers.formatEther(value));
+
+  if (!Number.isFinite(amount)) {
     return "0";
   }
 
-  if (eth >= 1000) return eth.toLocaleString(undefined, {
-    maximumFractionDigits: 2,
-  });
+  if (amount >= 1000) {
+    return amount.toLocaleString(undefined, {
+      maximumFractionDigits: 2,
+    });
+  }
 
-  if (eth >= 1) return eth.toFixed(2);
-  if (eth >= 0.1) return eth.toFixed(3);
-  if (eth >= 0.01) return eth.toFixed(4);
+  if (amount >= 1) {
+    return amount.toFixed(2);
+  }
 
-  return eth.toFixed(6);
+  if (amount >= 0.1) {
+    return amount.toFixed(3);
+  }
+
+  if (amount >= 0.01) {
+    return amount.toFixed(4);
+  }
+
+  return amount.toFixed(6);
+}
+
+function formatTokenAmount(amount: bigint): string {
+  try {
+    const value = Number(
+      ethers.formatUnits(amount, 18)
+    );
+
+    if (!Number.isFinite(value)) {
+      return amount.toString();
+    }
+
+    return value.toLocaleString(undefined, {
+      maximumFractionDigits: 2,
+    });
+  } catch {
+    return amount.toString();
+  }
+}
+
+function explorerBase(): string {
+  return (
+    process.env.ROBINHOOD_EXPLORER_URL ||
+    "https://explorer.mainnet.chain.robinhood.com"
+  ).replace(/\/$/, "");
 }
 
 function explorerTx(txHash: string): string {
-  const base =
-    process.env.ROBINHOOD_EXPLORER_URL ||
-    "https://explorer.mainnet.chain.robinhood.com";
-
-  return `${base.replace(/\/$/, "")}/tx/${txHash}`;
+  return `${explorerBase()}/tx/${txHash}`;
 }
 
 function explorerAddress(address: string): string {
-  const base =
-    process.env.ROBINHOOD_EXPLORER_URL ||
-    "https://explorer.mainnet.chain.robinhood.com";
-
-  return `${base.replace(/\/$/, "")}/address/${address}`;
+  return `${explorerBase()}/address/${address}`;
 }
 
-function shortenAddress(address: string): string {
-  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+function extractTelegram(
+  bot: TelegramOrBot
+): TelegramLike | undefined {
+  if ("sendMessage" in bot) {
+    return bot;
+  }
+
+  return bot.telegram;
 }
 
 function getSettings(group: {
@@ -151,83 +191,80 @@ function getSettings(group: {
   };
 }
 
-/**
- * Initialize the buy bot.
- *
- * Safe to call multiple times.
- */
 export async function initializeBuyBot(
-  bot?: BotLike
+  bot?: TelegramOrBot
 ): Promise<void> {
   if (bot) {
-    botRegistry.set("default", bot);
+    const telegram = extractTelegram(bot);
+
+    if (telegram) {
+      botRegistry.set("default", telegram);
+    }
   }
 
   try {
-    const rpc = config.robinhoodRpcUrl;
-    const token = config.babyTokenAddress;
-
     console.log("[BUYBOT] Initializing...");
-    console.log(`[BUYBOT] RPC: ${rpc}`);
-    console.log(`[BUYBOT] BABY: ${token}`);
-
-    const network = await getProvider().getNetwork();
-
     console.log(
-      `[BUYBOT] Connected chainId=${network.chainId.toString()}`
+      `[BUYBOT] RPC: ${config.robinhoodRpcUrl}`
+    );
+    console.log(
+      `[BUYBOT] BABY: ${config.babyTokenAddress}`
     );
 
-    const block = await getProvider().getBlockNumber();
+    const network =
+      await getProvider().getNetwork();
+
+    console.log(
+      `[BUYBOT] Chain ID: ${network.chainId.toString()}`
+    );
+
+    const block =
+      await getProvider().getBlockNumber();
 
     lastProcessedBlock = block;
 
     console.log(
-      `[BUYBOT] Current block=${block}`
+      `[BUYBOT] Starting from block: ${block}`
     );
   } catch (error) {
-    console.error("[BUYBOT] Initialization failed:", error);
+    console.error(
+      "[BUYBOT] Initialization failed:",
+      error
+    );
   }
 }
 
-/**
- * Start blockchain watcher.
- */
 export function startBuyBotWatcher(
-  bot?: BotLike
+  bot?: TelegramOrBot
 ): void {
   if (bot) {
-    botRegistry.set("default", bot);
+    const telegram = extractTelegram(bot);
+
+    if (telegram) {
+      botRegistry.set("default", telegram);
+    }
   }
 
   if (watcherRunning) {
-    console.log("[BUYBOT] Watcher already running");
+    console.log(
+      "[BUYBOT] Watcher already running"
+    );
     return;
   }
 
   watcherRunning = true;
 
-  console.log("[BUYBOT] Starting watcher...");
-
-  watcherTimer = setInterval(
-    async () => {
-      try {
-        await scanBuyTransactions();
-      } catch (error) {
-        console.error(
-          "[BUYBOT] Watcher error:",
-          error
-        );
-      }
-    },
-    3_000
+  console.log(
+    "[BUYBOT] Blockchain watcher started"
   );
+
+  watcherTimer = setInterval(() => {
+    void scanBuyTransactions();
+  }, 3000);
 
   void scanBuyTransactions();
 }
 
-/**
- * Stop blockchain watcher.
- */
 export function stopBuyBotWatcher(): void {
   watcherRunning = false;
 
@@ -236,20 +273,33 @@ export function stopBuyBotWatcher(): void {
     watcherTimer = null;
   }
 
-  console.log("[BUYBOT] Watcher stopped");
+  console.log(
+    "[BUYBOT] Blockchain watcher stopped"
+  );
 }
 
-/**
- * Scan new blocks for BABY token Transfer events.
- */
 async function scanBuyTransactions(): Promise<void> {
-  if (!watcherRunning && lastProcessedBlock !== null) {
+  if (
+    !watcherRunning &&
+    lastProcessedBlock !== null
+  ) {
     return;
   }
 
   const rpc = getProvider();
 
-  const currentBlock = await rpc.getBlockNumber();
+  let currentBlock: number;
+
+  try {
+    currentBlock =
+      await rpc.getBlockNumber();
+  } catch (error) {
+    console.error(
+      "[BUYBOT] Failed to get block:",
+      error
+    );
+    return;
+  }
 
   if (lastProcessedBlock === null) {
     lastProcessedBlock = currentBlock;
@@ -260,19 +310,16 @@ async function scanBuyTransactions(): Promise<void> {
     return;
   }
 
-  const fromBlock = lastProcessedBlock + 1;
+  const fromBlock =
+    lastProcessedBlock + 1;
 
-  // Keep RPC requests small.
   const toBlock = Math.min(
     currentBlock,
     fromBlock + 20
   );
 
-  const tokenAddress = getTokenAddress();
-
-  console.log(
-    `[BUYBOT] Scanning blocks ${fromBlock}-${toBlock}`
-  );
+  const tokenAddress =
+    getTokenAddress();
 
   try {
     const logs = await rpc.getLogs({
@@ -282,38 +329,34 @@ async function scanBuyTransactions(): Promise<void> {
       topics: [ERC20_TRANSFER_TOPIC],
     });
 
+    console.log(
+      `[BUYBOT] Blocks ${fromBlock}-${toBlock}: ${logs.length} transfer events`
+    );
+
     for (const log of logs) {
       await processTransferLog(
         log,
         tokenAddress
       );
     }
+
+    lastProcessedBlock = toBlock;
   } catch (error) {
     console.error(
-      "[BUYBOT] getLogs failed:",
+      "[BUYBOT] Failed scanning logs:",
       error
     );
-
-    return;
   }
-
-  lastProcessedBlock = toBlock;
 }
 
-/**
- * Process an ERC20 Transfer event.
- *
- * Important:
- * Transfer events alone cannot prove a purchase.
- * This function therefore treats incoming BABY transfers
- * as candidate buys and requires the originating transaction
- * to also contain native ETH value.
- */
 async function processTransferLog(
   log: ethers.Log,
   tokenAddress: string
 ): Promise<void> {
-  if (!log.topics || log.topics.length < 3) {
+  if (
+    !log.topics ||
+    log.topics.length < 3
+  ) {
     return;
   }
 
@@ -321,13 +364,27 @@ async function processTransferLog(
     return;
   }
 
-  const from = normalizeAddress(
-    ethers.dataSlice(log.topics[1], 12)
-  );
+  const fromTopic = log.topics[1];
+  const toTopic = log.topics[2];
 
-  const to = normalizeAddress(
-    ethers.dataSlice(log.topics[2], 12)
-  );
+  if (!fromTopic || !toTopic) {
+    return;
+  }
+
+  let from: string;
+  let to: string;
+
+  try {
+    from = normalizeAddress(
+      ethers.dataSlice(fromTopic, 12)
+    );
+
+    to = normalizeAddress(
+      ethers.dataSlice(toTopic, 12)
+    );
+  } catch {
+    return;
+  }
 
   if (
     from === ethers.ZeroAddress ||
@@ -348,42 +405,27 @@ async function processTransferLog(
     return;
   }
 
-  const transaction =
-    await getProvider().getTransaction(
-      log.transactionHash
-    );
+  let transaction:
+    | ethers.TransactionResponse
+    | null;
+
+  try {
+    transaction =
+      await getProvider().getTransaction(
+        log.transactionHash
+      );
+  } catch {
+    return;
+  }
 
   if (!transaction) {
     return;
   }
 
-  /*
-   * Candidate buy:
-   *
-   * The transaction must carry native ETH value.
-   * This filters out most ordinary transfers.
-   *
-   * DEX routers can make this heuristic imperfect,
-   * so this is intentionally labelled as a candidate.
-   */
   if (
     !transaction.value ||
     transaction.value <= 0n
   ) {
-    return;
-  }
-
-  const nativeAmount = transaction.value;
-
-  const nativeEth = Number(
-    ethers.formatEther(nativeAmount)
-  );
-
-  if (!Number.isFinite(nativeEth)) {
-    return;
-  }
-
-  if (nativeEth <= 0) {
     return;
   }
 
@@ -397,22 +439,20 @@ async function processTransferLog(
 
   await handleCandidateBuy(
     record,
-    nativeAmount
+    transaction.value
   );
 }
 
-/**
- * Handle a candidate BABY purchase.
- */
 async function handleCandidateBuy(
   record: TransferRecord,
   nativeAmount: bigint
 ): Promise<void> {
-  const groups = await prisma.group.findMany({
-    where: {
-      buyBotEnabled: true,
-    },
-  });
+  const groups =
+    await prisma.group.findMany({
+      where: {
+        buyBotEnabled: true,
+      },
+    });
 
   if (groups.length === 0) {
     return;
@@ -437,7 +477,7 @@ async function handleCandidateBuy(
       continue;
     }
 
-    const existing =
+    const duplicate =
       await prisma.groupEvent.findFirst({
         where: {
           groupId: group.id,
@@ -448,19 +488,20 @@ async function handleCandidateBuy(
         },
       });
 
-    if (existing) {
+    if (duplicate) {
       continue;
     }
 
     const whale =
       nativeEth >= settings.whaleEth;
 
-    const message = buildBuyMessage(
-      record,
-      nativeAmount,
-      settings,
-      whale
-    );
+    const message =
+      buildBuyMessage(
+        record,
+        nativeAmount,
+        settings,
+        whale
+      );
 
     await prisma.groupEvent.create({
       data: {
@@ -470,26 +511,30 @@ async function handleCandidateBuy(
         payload: JSON.stringify({
           txHash: record.txHash,
           buyer: record.buyer,
-          tokenAddress: record.tokenAddress,
+          tokenAddress:
+            record.tokenAddress,
           nativeAmount: nativeEth,
-          tokenAmount: record.amount.toString(),
-          blockNumber: record.blockNumber,
+          tokenAmount:
+            record.amount.toString(),
+          blockNumber:
+            record.blockNumber,
           whale,
         }),
       },
     });
 
-    const bot = botRegistry.get("default");
+    const telegram =
+      botRegistry.get("default");
 
-    if (!bot?.telegram?.sendMessage) {
+    if (!telegram) {
       console.warn(
-        `[BUYBOT] No Telegram bot registered for group ${group.telegramId}`
+        "[BUYBOT] Telegram instance not registered"
       );
       continue;
     }
 
     try {
-      await bot.telegram.sendMessage(
+      await telegram.sendMessage(
         group.telegramId,
         message,
         {
@@ -498,24 +543,19 @@ async function handleCandidateBuy(
       );
     } catch (error) {
       console.error(
-        `[BUYBOT] Failed to send alert to ${group.telegramId}:`,
+        `[BUYBOT] Telegram send failed for ${group.telegramId}:`,
         error
       );
     }
   }
 }
 
-/**
- * Build Telegram buy alert.
- */
 function buildBuyMessage(
   record: TransferRecord,
   nativeAmount: bigint,
   settings: BuyBotSettings,
   whale: boolean
 ): string {
-  const nativeEth = formatEth(nativeAmount);
-
   const title = whale
     ? "🐋🍼 BIG BABY BUY!"
     : "🍼💚 BABY BUY!";
@@ -523,7 +563,8 @@ function buildBuyMessage(
   const lines: string[] = [
     title,
     "",
-    `💰 Buy: ${nativeEth} ETH`,
+    `💰 Buy: ${formatEth(nativeAmount)} ETH`,
+    `🪙 BABY: ${formatTokenAmount(record.amount)}`,
   ];
 
   if (settings.showWallet) {
@@ -532,14 +573,11 @@ function buildBuyMessage(
     );
   }
 
-  lines.push(
-    `🪙 BABY: ${formatTokenAmount(record.amount)}`,
-    ""
-  );
+  lines.push("");
 
   if (settings.showTx) {
     lines.push(
-      `🔗 TX: ${explorerTx(record.txHash)}`
+      `🔗 Transaction: ${explorerTx(record.txHash)}`
     );
   }
 
@@ -551,76 +589,34 @@ function buildBuyMessage(
 
   lines.push(
     "",
-    "🍼 BABY is trading live on Robinhood Chain."
+    "🍼 $BABY is trading live on Robinhood Chain."
   );
 
   return lines.join("\n");
 }
 
-function formatTokenAmount(
-  amount: bigint
-): string {
-  /*
-   * BABY token decimals should normally be read from
-   * the contract rather than hardcoded.
-   *
-   * Default to 18 here because most ERC20 tokens use 18.
-   */
-  try {
-    const value = Number(
-      ethers.formatUnits(amount, 18)
-    );
-
-    if (!Number.isFinite(value)) {
-      return amount.toString();
-    }
-
-    return value.toLocaleString(
-      undefined,
-      {
-        maximumFractionDigits: 2,
-      }
-    );
-  } catch {
-    return amount.toString();
-  }
-}
-
-/**
- * Enable buy bot for a group.
- */
 export async function enableBuyBot(
   groupId: string
 ): Promise<void> {
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotEnabled: true,
     },
   });
 }
 
-/**
- * Disable buy bot for a group.
- */
 export async function disableBuyBot(
   groupId: string
 ): Promise<void> {
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotEnabled: false,
     },
   });
 }
 
-/**
- * Configure minimum buy amount.
- */
 export async function setBuyBotMinEth(
   groupId: string,
   amount: number
@@ -630,23 +626,18 @@ export async function setBuyBotMinEth(
     amount < 0
   ) {
     throw new Error(
-      "Minimum ETH amount must be a valid positive number"
+      "Invalid minimum ETH amount"
     );
   }
 
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotMinEth: amount,
     },
   });
 }
 
-/**
- * Configure whale threshold.
- */
 export async function setBuyBotWhaleEth(
   groupId: string,
   amount: number
@@ -656,82 +647,60 @@ export async function setBuyBotWhaleEth(
     amount <= 0
   ) {
     throw new Error(
-      "Whale ETH amount must be greater than zero"
+      "Invalid whale threshold"
     );
   }
 
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotWhaleEth: amount,
     },
   });
 }
 
-/**
- * Toggle wallet display.
- */
 export async function setBuyBotShowWallet(
   groupId: string,
   enabled: boolean
 ): Promise<void> {
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotShowWallet: enabled,
     },
   });
 }
 
-/**
- * Toggle USD display.
- */
 export async function setBuyBotShowUsd(
   groupId: string,
   enabled: boolean
 ): Promise<void> {
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotShowUsd: enabled,
     },
   });
 }
 
-/**
- * Toggle transaction display.
- */
 export async function setBuyBotShowTx(
   groupId: string,
   enabled: boolean
 ): Promise<void> {
   await prisma.group.update({
-    where: {
-      id: groupId,
-    },
+    where: { id: groupId },
     data: {
       buyBotShowTx: enabled,
     },
   });
 }
 
-/**
- * Get buy bot settings.
- */
 export async function getBuyBotSettings(
   groupId: string
 ) {
   const group =
     await prisma.group.findUnique({
-      where: {
-        id: groupId,
-      },
+      where: { id: groupId },
     });
 
   if (!group) {
@@ -741,9 +710,6 @@ export async function getBuyBotSettings(
   return getSettings(group);
 }
 
-/**
- * Get recent buy alerts from GroupEvent.
- */
 export async function getRecentBuyAlerts(
   groupId: string,
   limit = 20
@@ -765,9 +731,6 @@ export async function getRecentBuyAlerts(
   });
 }
 
-/**
- * Remove duplicate/stale alerts.
- */
 export async function clearBuyBotAlerts(
   groupId: string
 ): Promise<number> {
@@ -782,9 +745,6 @@ export async function clearBuyBotAlerts(
   return result.count;
 }
 
-/**
- * Health check.
- */
 export async function buyBotHealth(): Promise<{
   running: boolean;
   rpc: boolean;
