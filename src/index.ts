@@ -1,6 +1,10 @@
-import { Telegraf } from "telegraf";
+import {
+  Telegraf
+} from "telegraf";
 
-import { config } from "./config.js";
+import {
+  config
+} from "./config.js";
 
 import {
   prisma,
@@ -33,18 +37,22 @@ import {
 } from "./services/moderation.js";
 
 import {
-  handleMemberJoin
-} from "./services/raid.js";
-
-import {
   registerAdminPanel
 } from "./bot/adminPanel.js";
 
+import {
+  registerBuyBot
+} from "./bot/buybot.js";
+
+import {
+  initializeBuyBot,
+  startBuyBotWatcher,
+  stopBuyBotWatcher
+} from "./services/buybot.js";
 
 const bot = new Telegraf(
   config.botToken
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -74,13 +82,11 @@ async function requireAdmin(
   return admin;
 }
 
-
 function getReplyTarget(
   ctx: any
 ) {
   return ctx.message?.reply_to_message?.from;
 }
-
 
 async function getGroup(
   chatId: number,
@@ -91,7 +97,6 @@ async function getGroup(
     title
   );
 }
-
 
 /*
 |--------------------------------------------------------------------------
@@ -113,7 +118,6 @@ bot.start(async (ctx) => {
   );
 });
 
-
 /*
 |--------------------------------------------------------------------------
 | HELP
@@ -131,6 +135,13 @@ bot.command(
         "/rules — View community rules",
         "/stats — View group statistics",
         "/rank — View your rank",
+        "",
+        "BUY BOT",
+        "/buybot — View Buy Bot status",
+        "/buybot_on — Enable Buy Bot",
+        "/buybot_off — Disable Buy Bot",
+        "/buybot_min 0.1 — Set minimum buy",
+        "/buybot_whale 2 — Set whale threshold",
         "",
         "ADMIN COMMANDS",
         "/panel — Admin control panel",
@@ -151,7 +162,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -176,7 +186,6 @@ bot.command(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | STATS
@@ -197,7 +206,8 @@ bot.command(
     const [
       members,
       warnings,
-      messages
+      messages,
+      buyAlerts
     ] = await Promise.all([
       prisma.member.count({
         where: {
@@ -215,9 +225,14 @@ bot.command(
         where: {
           groupId: group.id
         },
-
         _sum: {
           messages: true
+        }
+      }),
+
+      prisma.buyAlert.count({
+        where: {
+          groupId: group.id
         }
       })
     ]);
@@ -229,16 +244,17 @@ bot.command(
         `👥 Members: ${members}`,
         `💬 Messages: ${messages._sum.messages || 0}`,
         `⚠️ Warnings: ${warnings}`,
+        `🍼 Buy Alerts: ${buyAlerts}`,
         "",
         `🛡 Anti-spam: ${group.antiSpamEnabled ? "ON" : "OFF"}`,
         `🔗 Anti-links: ${group.antiLinksEnabled ? "ON" : "OFF"}`,
         `🚨 Anti-raid: ${group.antiRaidEnabled ? "ON" : "OFF"}`,
-        `🔒 Lockdown: ${group.lockdown ? "ON" : "OFF"}`
+        `🔒 Lockdown: ${group.lockdown ? "ON" : "OFF"}`,
+        `💚 Buy Bot: ${group.buyBotEnabled ? "ON" : "OFF"}`
       ].join("\n")
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -283,7 +299,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -419,7 +434,6 @@ bot.command(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | WARNINGS
@@ -463,7 +477,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -516,7 +529,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -626,7 +638,6 @@ async function changeMute(
   }
 }
 
-
 bot.command(
   "mute",
   (ctx) => changeMute(ctx, true)
@@ -636,7 +647,6 @@ bot.command(
   "unmute",
   (ctx) => changeMute(ctx, false)
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -714,7 +724,6 @@ bot.command(
     }
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -798,7 +807,6 @@ bot.command(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | UNBAN
@@ -878,7 +886,6 @@ bot.command(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | LOCKDOWN
@@ -905,7 +912,6 @@ bot.command(
       where: {
         id: group.id
       },
-
       data: {
         lockdown: true
       }
@@ -927,7 +933,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -955,7 +960,6 @@ bot.command(
       where: {
         id: group.id
       },
-
       data: {
         lockdown: false
       }
@@ -973,7 +977,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -1020,7 +1023,6 @@ bot.command(
       where: {
         id: group.id
       },
-
       data: {
         welcomeMessage: text
       }
@@ -1040,7 +1042,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -1087,7 +1088,6 @@ bot.command(
       where: {
         id: group.id
       },
-
       data: {
         rules: text
       }
@@ -1105,7 +1105,6 @@ bot.command(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -1141,38 +1140,45 @@ bot.command(
         "",
         `🌊 Flood limit: ${group.maxMessages}`,
         `⏱ Flood window: ${group.floodWindowSec}s`,
-        `⚠️ Warning limit: ${group.maxWarnings}`
+        `⚠️ Warning limit: ${group.maxWarnings}`,
+        "",
+        "🍼 BUY BOT",
+        `Status: ${group.buyBotEnabled ? "ON" : "OFF"}`,
+        `Minimum buy: ${group.buyBotMinEth} ETH`,
+        `Whale threshold: ${group.buyBotWhaleEth} ETH`,
+        `Show wallet: ${group.buyBotShowWallet ? "ON" : "OFF"}`,
+        `Show USD: ${group.buyBotShowUsd ? "ON" : "OFF"}`,
+        `Show TX: ${group.buyBotShowTx ? "ON" : "OFF"}`
       ].join("\n")
     );
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
-| NEW MEMBERS / ANTI-RAID
+| NEW MEMBERS
 |--------------------------------------------------------------------------
 */
 
 bot.on(
   "new_chat_members",
   async (ctx) => {
-    if (!ctx.chat) {
-      return;
-    }
+    if (!ctx.chat) return;
 
-    /*
-     * IMPORTANT:
-     *
-     * Do not use ctx.chat.title here.
-     * Telegraf's Chat type can also be PrivateChat.
-     */
+    const title =
+      "title" in ctx.chat
+        ? ctx.chat.title
+        : "BABY";
 
     const group =
       await getGroup(
         ctx.chat.id,
-        "BABY"
+        title || "BABY"
       );
+
+    if (!group.welcomeEnabled) {
+      return;
+    }
 
     for (
       const member
@@ -1183,32 +1189,13 @@ bot.on(
         member
       );
 
-      /*
-       * Anti-raid detection
-       */
-
-      await handleMemberJoin(
-        bot,
-        ctx.chat.id,
-        member.id
+      await ctx.reply(
+        [
+          group.welcomeMessage,
+          "",
+          `🍼 Welcome, ${member.first_name}!`
+        ].join("\n")
       );
-
-      /*
-       * Welcome message
-       */
-
-      if (
-        group.welcomeEnabled &&
-        !group.lockdown
-      ) {
-        await ctx.reply(
-          [
-            group.welcomeMessage,
-            "",
-            `🍼 Welcome, ${member.first_name}!`
-          ].join("\n")
-        );
-      }
 
       await audit(
         bot,
@@ -1221,7 +1208,6 @@ bot.on(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | LEFT MEMBER
@@ -1231,13 +1217,14 @@ bot.on(
 bot.on(
   "left_chat_member",
   async (ctx) => {
-    if (!ctx.chat) {
-      return;
-    }
+    if (!ctx.chat) return;
 
     const group =
       await getGroup(
-        ctx.chat.id
+        ctx.chat.id,
+        "title" in ctx.chat
+          ? ctx.chat.title
+          : "BABY"
       );
 
     const member =
@@ -1269,7 +1256,6 @@ bot.on(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | MESSAGE MODERATION
@@ -1286,20 +1272,12 @@ bot.on(
       return;
     }
 
-    /*
-     * Only moderate groups.
-     */
-
     if (
       ctx.chat.type !== "group" &&
       ctx.chat.type !== "supergroup"
     ) {
       return;
     }
-
-    /*
-     * Ignore Telegram service messages.
-     */
 
     if (
       "new_chat_members" in
@@ -1315,16 +1293,14 @@ bot.on(
       return;
     }
 
-    /*
-     * Do NOT use ctx.chat.title.
-     *
-     * We deliberately use "BABY" here because
-     * Telegram's Chat union does not guarantee title.
-     */
+    const title =
+      "title" in ctx.chat
+        ? ctx.chat.title
+        : undefined;
 
     await getGroup(
       ctx.chat.id,
-      "BABY"
+      title
     );
 
     await moderate(
@@ -1335,7 +1311,6 @@ bot.on(
     );
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -1352,7 +1327,6 @@ bot.catch(
   }
 );
 
-
 /*
 |--------------------------------------------------------------------------
 | STARTUP
@@ -1364,22 +1338,37 @@ async function main() {
     "🍼 Starting BABY Group Manager..."
   );
 
+  /*
+   * PostgreSQL
+   */
   await connectDatabase();
 
   console.log(
     "🗄️ PostgreSQL connected"
   );
 
+  /*
+   * Redis
+   */
   await connectRedis();
 
   console.log(
     "⚡ Redis connection verified"
   );
 
-  registerAdminPanel(
-    bot
-  );
+  /*
+   * Admin panel
+   */
+  registerAdminPanel(bot);
 
+  /*
+   * Buy Bot commands
+   */
+  registerBuyBot(bot);
+
+  /*
+   * Verify Telegram bot
+   */
   const me =
     await bot.telegram.getMe();
 
@@ -1387,13 +1376,34 @@ async function main() {
     `🤖 Connected as @${me.username}`
   );
 
+  /*
+   * Initialize blockchain scanner
+   */
+  await initializeBuyBot();
+
+  /*
+   * Start Telegram bot
+   */
   await bot.launch();
 
   console.log(
     "🟢 BABY Group Manager running"
   );
-}
 
+  /*
+   * Start Buy Bot watcher
+   *
+   * This starts AFTER Telegram has launched,
+   * so the bot is ready to send alerts.
+   */
+  startBuyBotWatcher(
+    bot.telegram
+  );
+
+  console.log(
+    "🍼💚 BABY Buy Bot running"
+  );
+}
 
 /*
 |--------------------------------------------------------------------------
@@ -1408,10 +1418,28 @@ async function shutdown(
     `\n🛑 Received ${signal}. Shutting down...`
   );
 
+  /*
+   * Stop blockchain watcher
+   */
+  try {
+    stopBuyBotWatcher();
+  } catch (error) {
+    console.error(
+      "Buy Bot shutdown error:",
+      error
+    );
+  }
+
+  /*
+   * Stop Telegram
+   */
   try {
     bot.stop(signal);
   } catch {}
 
+  /*
+   * Close Redis
+   */
   try {
     await closeRedis();
   } catch (error) {
@@ -1421,6 +1449,9 @@ async function shutdown(
     );
   }
 
+  /*
+   * Close PostgreSQL
+   */
   try {
     await disconnectDatabase();
   } catch (error) {
@@ -1437,7 +1468,6 @@ async function shutdown(
   process.exit(0);
 }
 
-
 process.once(
   "SIGINT",
   () => {
@@ -1445,14 +1475,12 @@ process.once(
   }
 );
 
-
 process.once(
   "SIGTERM",
   () => {
     void shutdown("SIGTERM");
   }
 );
-
 
 /*
 |--------------------------------------------------------------------------
@@ -1466,6 +1494,10 @@ main().catch(
       "🔥 Fatal startup error:",
       error
     );
+
+    try {
+      stopBuyBotWatcher();
+    } catch {}
 
     try {
       await closeRedis();
