@@ -594,7 +594,7 @@ export async function scanTransaction(
         tokenAddress: token,
         nativeAmount,
         tokenAmount: value.toString(),
-        blockNumber: receipt.blockNumber
+        blockNumber: data.blockNumber ?? 0n,
           ? BigInt(receipt.blockNumber)
           : undefined
       });
@@ -623,4 +623,51 @@ export async function cleanupOldBuyAlerts(
       }
     }
   });
+}
+let buyBotWatcherRunning = false;
+
+export async function initializeBuyBot(): Promise<void> {
+  if (buyBotWatcherRunning) {
+    return;
+  }
+
+  console.log("[BUYBOT] Initializing Robinhood Chain buy bot...");
+
+  try {
+    const blockNumber = await provider.getBlockNumber();
+
+    console.log(
+      `[BUYBOT] Connected to Robinhood Chain at block ${blockNumber}`
+    );
+
+    buyBotWatcherRunning = true;
+  } catch (error) {
+    console.error(
+      "[BUYBOT] Failed to initialize:",
+      error
+    );
+
+    throw error;
+  }
+}
+
+export async function startBuyBotWatcher(): Promise<void> {
+  if (buyBotWatcherRunning) {
+    console.log("[BUYBOT] Watcher already running");
+    return;
+  }
+
+  await initializeBuyBot();
+
+  console.log("[BUYBOT] Watcher started");
+}
+
+export async function stopBuyBotWatcher(): Promise<void> {
+  if (!buyBotWatcherRunning) {
+    return;
+  }
+
+  buyBotWatcherRunning = false;
+
+  console.log("[BUYBOT] Watcher stopped");
 }
