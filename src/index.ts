@@ -13,6 +13,7 @@ import {
 } from "./db.js";
 
 import {
+  connectRedis,
   closeRedis
 } from "./redis.js";
 
@@ -35,24 +36,32 @@ import {
   moderate
 } from "./services/moderation.js";
 
-const bot =
-  new Telegraf(
-    config.botToken
-  );
+import {
+  registerAdminPanel
+} from "./bot/adminPanel.js";
+
+const bot = new Telegraf(
+  config.botToken
+);
+
+/*
+|--------------------------------------------------------------------------
+| HELPERS
+|--------------------------------------------------------------------------
+*/
 
 async function requireAdmin(
   ctx: any
-) {
+): Promise<boolean> {
   if (!ctx.chat || !ctx.from) {
     return false;
   }
 
-  const admin =
-    await isAdmin(
-      bot,
-      ctx.chat.id,
-      ctx.from.id
-    );
+  const admin = await isAdmin(
+    bot,
+    ctx.chat.id,
+    ctx.from.id
+  );
 
   if (!admin) {
     await ctx.reply(
@@ -63,12 +72,20 @@ async function requireAdmin(
   return admin;
 }
 
-function replyTarget(
+function getReplyTarget(
   ctx: any
 ) {
-  return ctx.message
-    ?.reply_to_message
-    ?.from;
+  return ctx.message?.reply_to_message?.from;
+}
+
+async function getGroup(
+  chatId: number,
+  title?: string
+) {
+  return getOrCreateGroup(
+    String(chatId),
+    title
+  );
 }
 
 /*
@@ -77,14 +94,16 @@ function replyTarget(
 |--------------------------------------------------------------------------
 */
 
-bot.start(async ctx => {
+bot.start(async (ctx) => {
   await ctx.reply(
     [
       "🍼💚 BABY GROUP MANAGER",
       "",
       "Community security and moderation system.",
       "",
-      "Use /help to see available commands."
+      "Use /help to see available commands.",
+      "",
+      "Admins can use /panel to open the control panel."
     ].join("\n")
   );
 });
@@ -97,30 +116,31 @@ bot.start(async ctx => {
 
 bot.command(
   "help",
-  async ctx => {
+  async (ctx) => {
     await ctx.reply(
       [
         "🍼💚 BABY GROUP MANAGER",
         "",
-        "MEMBER",
-        "/rules",
-        "/stats",
-        "/rank",
+        "MEMBER COMMANDS",
+        "/rules — View community rules",
+        "/stats — View group statistics",
+        "/rank — View your rank",
         "",
-        "ADMIN",
-        "/warn",
-        "/warnings",
-        "/clearwarnings",
-        "/mute",
-        "/unmute",
-        "/ban",
-        "/unban",
-        "/kick",
-        "/lockdown",
-        "/unlock",
-        "/setwelcome",
-        "/setrules",
-        "/settings"
+        "ADMIN COMMANDS",
+        "/panel — Admin control panel",
+        "/warn — Warn a member",
+        "/warnings — View warnings",
+        "/clearwarnings — Clear warnings",
+        "/mute — Mute member",
+        "/unmute — Unmute member",
+        "/ban — Ban member",
+        "/unban USER_ID — Unban member",
+        "/kick — Remove member",
+        "/lockdown — Lock group",
+        "/unlock — Unlock group",
+        "/setwelcome — Change welcome message",
+        "/setrules — Change rules",
+        "/settings — View settings"
       ].join("\n")
     );
   }
@@ -134,13 +154,13 @@ bot.command(
 
 bot.command(
   "rules",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat) return;
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id),
-        ctx.chat.type
+      await getGroup(
+        ctx.chat.id,
+        "BABY"
       );
 
     await ctx.reply(
@@ -157,21 +177,27 @@ bot.command(
 
 bot.command(
   "stats",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat) return;
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id),
-        ctx.chat.type
+      await getGroup(
+        ctx.chat.id,
+        "BABY"
       );
 
     const [
       members,
-      messages,
-      warnings
+      warnings,
+      messages
     ] = await Promise.all([
       prisma.member.count({
+        where: {
+          groupId: group.id
+        }
+      }),
+
+      prisma.warning.count({
         where: {
           groupId: group.id
         }
@@ -185,27 +211,21 @@ bot.command(
         _sum: {
           messages: true
         }
-      }),
-
-      prisma.warning.count({
-        where: {
-          groupId: group.id
-        }
       })
     ]);
 
     await ctx.reply(
       [
-        "🍼💚 BABY STATS",
+        "🍼💚 BABY GROUP STATS",
         "",
-        `Members: ${members}`,
-        `Messages: ${messages._sum.messages || 0}`,
-        `Warnings: ${warnings}`,
+        `👥 Members: ${members}`,
+        `💬 Messages: ${messages._sum.messages || 0}`,
+        `⚠️ Warnings: ${warnings}`,
         "",
-        `Anti-spam: ${group.antiSpamEnabled ? "ON" : "OFF"}`,
-        `Anti-links: ${group.antiLinksEnabled ? "ON" : "OFF"}`,
-        `Anti-raid: ${group.antiRaidEnabled ? "ON" : "OFF"}`,
-        `Lockdown: ${group.lockdown ? "ON" : "OFF"}`
+        `🛡 Anti-spam: ${group.antiSpamEnabled ? "ON" : "OFF"}`,
+        `🔗 Anti-links: ${group.antiLinksEnabled ? "ON" : "OFF"}`,
+        `🚨 Anti-raid: ${group.antiRaidEnabled ? "ON" : "OFF"}`,
+        `🔒 Lockdown: ${group.lockdown ? "ON" : "OFF"}`
       ].join("\n")
     );
   }
@@ -219,14 +239,15 @@ bot.command(
 
 bot.command(
   "rank",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat || !ctx.from) {
       return;
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id,
+        "BABY"
       );
 
     const member =
@@ -242,7 +263,7 @@ bot.command(
 
     await ctx.reply(
       [
-        "🍼 COMMUNITY RANK",
+        "🍼💚 COMMUNITY RANK",
         "",
         `User: @${ctx.from.username || ctx.from.first_name}`,
         `Level: ${level}`,
@@ -262,7 +283,7 @@ bot.command(
 
 bot.command(
   "warn",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -272,19 +293,33 @@ bot.command(
     }
 
     const target =
-      replyTarget(ctx);
+      getReplyTarget(ctx);
 
     if (!target) {
       await ctx.reply(
-        "Reply to a member's message with /warn [reason]."
+        "Reply to the member's message with /warn [reason]."
+      );
+
+      return;
+    }
+
+    if (
+      await isAdmin(
+        bot,
+        ctx.chat.id,
+        target.id
+      )
+    ) {
+      await ctx.reply(
+        "⛔ You cannot warn another administrator."
       );
 
       return;
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     const member =
@@ -297,7 +332,8 @@ bot.command(
       ctx.message.text
         .split(" ")
         .slice(1)
-        .join(" ") ||
+        .join(" ")
+        .trim() ||
       "No reason provided";
 
     await createWarning(
@@ -314,6 +350,9 @@ bot.command(
         }
       });
 
+    const warningCount =
+      updated?.warnings || 0;
+
     await audit(
       bot,
       group.id,
@@ -324,11 +363,17 @@ bot.command(
     );
 
     await ctx.reply(
-      `⚠️ WARNING ${updated?.warnings || 0}/${group.maxWarnings}\n\nReason: ${reason}`
+      [
+        "⚠️ MEMBER WARNING",
+        "",
+        `User: @${target.username || target.first_name}`,
+        `Warnings: ${warningCount}/${group.maxWarnings}`,
+        `Reason: ${reason}`
+      ].join("\n")
     );
 
     if (
-      (updated?.warnings || 0) >=
+      warningCount >=
       group.maxWarnings
     ) {
       try {
@@ -337,16 +382,29 @@ bot.command(
           target.id,
           {
             permissions: {
-              can_send_messages:
-                false
+              can_send_messages: false
             }
           }
         );
 
-        await ctx.reply(
-          "🔇 Warning limit reached. Member muted."
+        await audit(
+          bot,
+          group.id,
+          "AUTO_MUTE",
+          "SYSTEM",
+          String(target.id),
+          "Maximum warning limit reached"
         );
-      } catch {}
+
+        await ctx.reply(
+          "🔇 Warning limit reached. Member has been muted."
+        );
+      } catch (error) {
+        console.error(
+          "Auto mute failed:",
+          error
+        );
+      }
     }
   }
 );
@@ -359,27 +417,25 @@ bot.command(
 
 bot.command(
   "warnings",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat) return;
 
     const target =
-      replyTarget(ctx) ||
+      getReplyTarget(ctx) ||
       ctx.from;
 
     if (!target) return;
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     const member =
       await prisma.member.findUnique({
         where: {
           groupId_telegramId: {
-            groupId:
-              group.id,
-
+            groupId: group.id,
             telegramId:
               String(target.id)
           }
@@ -387,7 +443,12 @@ bot.command(
       });
 
     await ctx.reply(
-      `⚠️ @${target.username || target.first_name} has ${member?.warnings || 0} warning(s).`
+      [
+        "⚠️ WARNINGS",
+        "",
+        `User: @${target.username || target.first_name}`,
+        `Warnings: ${member?.warnings || 0}/${group.maxWarnings}`
+      ].join("\n")
     );
   }
 );
@@ -400,7 +461,7 @@ bot.command(
 
 bot.command(
   "clearwarnings",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -410,19 +471,19 @@ bot.command(
     }
 
     const target =
-      replyTarget(ctx);
+      getReplyTarget(ctx);
 
     if (!target) {
       await ctx.reply(
-        "Reply to the member with /clearwarnings."
+        "Reply to the member's message with /clearwarnings."
       );
 
       return;
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await clearWarnings(
@@ -439,7 +500,7 @@ bot.command(
     );
 
     await ctx.reply(
-      "✅ Warnings cleared."
+      "✅ Member warnings cleared."
     );
   }
 );
@@ -463,7 +524,7 @@ async function changeMute(
   }
 
   const target =
-    replyTarget(ctx);
+    getReplyTarget(ctx);
 
   if (!target) {
     await ctx.reply(
@@ -500,28 +561,20 @@ async function changeMute(
           : {
               can_send_messages:
                 true,
-
               can_send_audios:
                 true,
-
               can_send_documents:
                 true,
-
               can_send_photos:
                 true,
-
               can_send_videos:
                 true,
-
               can_send_video_notes:
                 true,
-
               can_send_voice_notes:
                 true,
-
               can_send_polls:
                 true,
-
               can_add_web_page_previews:
                 true
             }
@@ -529,8 +582,8 @@ async function changeMute(
     );
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await audit(
@@ -548,21 +601,26 @@ async function changeMute(
         ? "🔇 Member muted."
         : "🔊 Member unmuted."
     );
-  } catch {
+  } catch (error) {
+    console.error(
+      "Mute operation failed:",
+      error
+    );
+
     await ctx.reply(
-      "❌ Telegram rejected the action. Check bot permissions."
+      "❌ Telegram rejected the action. Check the bot's administrator permissions."
     );
   }
 }
 
 bot.command(
   "mute",
-  ctx => changeMute(ctx, true)
+  (ctx) => changeMute(ctx, true)
 );
 
 bot.command(
   "unmute",
-  ctx => changeMute(ctx, false)
+  (ctx) => changeMute(ctx, false)
 );
 
 /*
@@ -573,7 +631,7 @@ bot.command(
 
 bot.command(
   "ban",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -583,7 +641,7 @@ bot.command(
     }
 
     const target =
-      replyTarget(ctx);
+      getReplyTarget(ctx);
 
     if (!target) {
       await ctx.reply(
@@ -601,7 +659,7 @@ bot.command(
       )
     ) {
       await ctx.reply(
-        "⛔ Cannot ban another administrator."
+        "⛔ You cannot ban another administrator."
       );
 
       return;
@@ -614,8 +672,8 @@ bot.command(
       );
 
       const group =
-        await getOrCreateGroup(
-          String(ctx.chat.id)
+        await getGroup(
+          ctx.chat.id
         );
 
       await audit(
@@ -627,9 +685,14 @@ bot.command(
       );
 
       await ctx.reply(
-        "🚫 Member banned."
+        "🚫 Member permanently banned."
       );
-    } catch {
+    } catch (error) {
+      console.error(
+        "Ban failed:",
+        error
+      );
+
       await ctx.reply(
         "❌ Unable to ban member."
       );
@@ -645,7 +708,7 @@ bot.command(
 
 bot.command(
   "kick",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -655,11 +718,25 @@ bot.command(
     }
 
     const target =
-      replyTarget(ctx);
+      getReplyTarget(ctx);
 
     if (!target) {
       await ctx.reply(
         "Reply to the member's message with /kick."
+      );
+
+      return;
+    }
+
+    if (
+      await isAdmin(
+        bot,
+        ctx.chat.id,
+        target.id
+      )
+    ) {
+      await ctx.reply(
+        "⛔ You cannot kick another administrator."
       );
 
       return;
@@ -676,10 +753,28 @@ bot.command(
         target.id
       );
 
-      await ctx.reply(
-        "👢 Member removed."
+      const group =
+        await getGroup(
+          ctx.chat.id
+        );
+
+      await audit(
+        bot,
+        group.id,
+        "KICK",
+        String(ctx.from.id),
+        String(target.id)
       );
-    } catch {
+
+      await ctx.reply(
+        "👢 Member removed from the group."
+      );
+    } catch (error) {
+      console.error(
+        "Kick failed:",
+        error
+      );
+
       await ctx.reply(
         "❌ Unable to remove member."
       );
@@ -695,7 +790,7 @@ bot.command(
 
 bot.command(
   "unban",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -710,7 +805,22 @@ bot.command(
 
     if (!id) {
       await ctx.reply(
-        "Usage: /unban USER_ID"
+        "Usage:\n/unban USER_ID"
+      );
+
+      return;
+    }
+
+    const userId =
+      Number(id);
+
+    if (
+      !Number.isSafeInteger(
+        userId
+      )
+    ) {
+      await ctx.reply(
+        "❌ Invalid Telegram user ID."
       );
 
       return;
@@ -719,13 +829,31 @@ bot.command(
     try {
       await bot.telegram.unbanChatMember(
         ctx.chat.id,
-        Number(id)
+        userId
+      );
+
+      const group =
+        await getGroup(
+          ctx.chat.id
+        );
+
+      await audit(
+        bot,
+        group.id,
+        "UNBAN",
+        String(ctx.from.id),
+        String(userId)
       );
 
       await ctx.reply(
         "✅ User unbanned."
       );
-    } catch {
+    } catch (error) {
+      console.error(
+        "Unban failed:",
+        error
+      );
+
       await ctx.reply(
         "❌ Unable to unban user."
       );
@@ -741,7 +869,7 @@ bot.command(
 
 bot.command(
   "lockdown",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -751,8 +879,8 @@ bot.command(
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await prisma.group.update({
@@ -773,7 +901,11 @@ bot.command(
     );
 
     await ctx.reply(
-      "🚨 BABY LOCKDOWN ACTIVATED."
+      [
+        "🚨 BABY LOCKDOWN ACTIVATED",
+        "",
+        "New messages from normal members will be removed."
+      ].join("\n")
     );
   }
 );
@@ -786,7 +918,7 @@ bot.command(
 
 bot.command(
   "unlock",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -796,8 +928,8 @@ bot.command(
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await prisma.group.update({
@@ -831,7 +963,7 @@ bot.command(
 
 bot.command(
   "setwelcome",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -850,15 +982,18 @@ bot.command(
 
     if (!text) {
       await ctx.reply(
-        "Usage:\n/setwelcome Your welcome message"
+        [
+          "Usage:",
+          "/setwelcome Your welcome message"
+        ].join("\n")
       );
 
       return;
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await prisma.group.update({
@@ -867,10 +1002,18 @@ bot.command(
       },
 
       data: {
-        welcomeMessage:
-          text
+        welcomeMessage: text
       }
     });
+
+    await audit(
+      bot,
+      group.id,
+      "SET_WELCOME",
+      String(ctx.from.id),
+      undefined,
+      text
+    );
 
     await ctx.reply(
       "✅ Welcome message updated."
@@ -886,7 +1029,7 @@ bot.command(
 
 bot.command(
   "setrules",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -905,15 +1048,18 @@ bot.command(
 
     if (!text) {
       await ctx.reply(
-        "Usage:\n/setrules Your rules"
+        [
+          "Usage:",
+          "/setrules Your rules"
+        ].join("\n")
       );
 
       return;
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await prisma.group.update({
@@ -926,8 +1072,15 @@ bot.command(
       }
     });
 
+    await audit(
+      bot,
+      group.id,
+      "SET_RULES",
+      String(ctx.from.id)
+    );
+
     await ctx.reply(
-      "✅ Rules updated."
+      "✅ Community rules updated."
     );
   }
 );
@@ -940,7 +1093,7 @@ bot.command(
 
 bot.command(
   "settings",
-  async ctx => {
+  async (ctx) => {
     if (
       !ctx.chat ||
       !ctx.from ||
@@ -950,22 +1103,23 @@ bot.command(
     }
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
 
     await ctx.reply(
       [
-        "⚙️ BABY SETTINGS",
+        "⚙️ BABY GROUP SETTINGS",
         "",
-        `Anti-spam: ${group.antiSpamEnabled ? "ON" : "OFF"}`,
-        `Anti-links: ${group.antiLinksEnabled ? "ON" : "OFF"}`,
-        `Anti-raid: ${group.antiRaidEnabled ? "ON" : "OFF"}`,
-        `Lockdown: ${group.lockdown ? "ON" : "OFF"}`,
+        `👋 Welcome: ${group.welcomeEnabled ? "ON" : "OFF"}`,
+        `🛡 Anti-spam: ${group.antiSpamEnabled ? "ON" : "OFF"}`,
+        `🔗 Anti-links: ${group.antiLinksEnabled ? "ON" : "OFF"}`,
+        `🚨 Anti-raid: ${group.antiRaidEnabled ? "ON" : "OFF"}`,
+        `🔒 Lockdown: ${group.lockdown ? "ON" : "OFF"}`,
         "",
-        `Flood limit: ${group.maxMessages}`,
-        `Flood window: ${group.floodWindowSec}s`,
-        `Warning limit: ${group.maxWarnings}`
+        `🌊 Flood limit: ${group.maxMessages}`,
+        `⏱ Flood window: ${group.floodWindowSec}s`,
+        `⚠️ Warning limit: ${group.maxWarnings}`
       ].join("\n")
     );
   }
@@ -979,25 +1133,22 @@ bot.command(
 
 bot.on(
   "new_chat_members",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat) return;
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id),
-        "BABY"
+      await getGroup(
+        ctx.chat.id,
+        ctx.chat.title || "BABY"
       );
 
-    if (
-      !group.welcomeEnabled
-    ) {
+    if (!group.welcomeEnabled) {
       return;
     }
 
     for (
       const member
-      of ctx.message
-          .new_chat_members
+      of ctx.message.new_chat_members
     ) {
       await upsertMember(
         group.id,
@@ -1005,7 +1156,19 @@ bot.on(
       );
 
       await ctx.reply(
-        `${group.welcomeMessage}\n\nWelcome, ${member.first_name}! 🍼💚`
+        [
+          group.welcomeMessage,
+          "",
+          `🍼 Welcome, ${member.first_name}!`
+        ].join("\n")
+      );
+
+      await audit(
+        bot,
+        group.id,
+        "MEMBER_JOINED",
+        "SYSTEM",
+        String(member.id)
       );
     }
   }
@@ -1013,35 +1176,46 @@ bot.on(
 
 /*
 |--------------------------------------------------------------------------
-| LEFT MEMBERS
+| LEFT MEMBER
 |--------------------------------------------------------------------------
 */
 
 bot.on(
   "left_chat_member",
-  async ctx => {
+  async (ctx) => {
     if (!ctx.chat) return;
 
     const group =
-      await getOrCreateGroup(
-        String(ctx.chat.id)
+      await getGroup(
+        ctx.chat.id
       );
+
+    const member =
+      ctx.message.left_chat_member;
 
     await prisma.groupEvent.create({
       data: {
-        groupId:
-          group.id,
-
-        type:
-          "MEMBER_LEFT",
-
+        groupId: group.id,
+        type: "MEMBER_LEFT",
         telegramId:
-          String(
-            ctx.message
-              .left_chat_member.id
-          )
+          String(member.id),
+        payload:
+          JSON.stringify({
+            username:
+              member.username,
+            firstName:
+              member.first_name
+          })
       }
     });
+
+    await audit(
+      bot,
+      group.id,
+      "MEMBER_LEFT",
+      "SYSTEM",
+      String(member.id)
+    );
   }
 );
 
@@ -1053,16 +1227,17 @@ bot.on(
 
 bot.on(
   "message",
-  async ctx => {
-    if (!ctx.chat || !ctx.from) {
+  async (ctx) => {
+    if (
+      !ctx.chat ||
+      !ctx.from
+    ) {
       return;
     }
 
     if (
-      ctx.chat.type !==
-        "group" &&
-      ctx.chat.type !==
-        "supergroup"
+      ctx.chat.type !== "group" &&
+      ctx.chat.type !== "supergroup"
     ) {
       return;
     }
@@ -1081,9 +1256,9 @@ bot.on(
       return;
     }
 
-    await getOrCreateGroup(
-      String(ctx.chat.id),
-      ctx.chat.type
+    await getGroup(
+      ctx.chat.id,
+      ctx.chat.title
     );
 
     await moderate(
@@ -1097,31 +1272,49 @@ bot.on(
 
 /*
 |--------------------------------------------------------------------------
-| ERROR HANDLER
+| BOT ERROR HANDLER
 |--------------------------------------------------------------------------
 */
 
-bot.catch(error => {
-  console.error(
-    "Telegram error:",
-    error
-  );
-});
+bot.catch(
+  (error) => {
+    console.error(
+      "❌ Telegram bot error:",
+      error
+    );
+  }
+);
 
 /*
 |--------------------------------------------------------------------------
-| START
+| STARTUP
 |--------------------------------------------------------------------------
 */
 
 async function main() {
+  console.log(
+    "🍼 Starting BABY Group Manager..."
+  );
+
   await connectDatabase();
+
+  console.log(
+    "🗄️ PostgreSQL connected"
+  );
+
+  await connectRedis();
+
+  console.log(
+    "⚡ Redis connection verified"
+  );
+
+  registerAdminPanel(bot);
 
   const me =
     await bot.telegram.getMe();
 
   console.log(
-    `🍼 Connected as @${me.username}`
+    `🤖 Connected as @${me.username}`
   );
 
   await bot.launch();
@@ -1131,41 +1324,83 @@ async function main() {
   );
 }
 
+/*
+|--------------------------------------------------------------------------
+| SHUTDOWN
+|--------------------------------------------------------------------------
+*/
+
 async function shutdown(
   signal: string
 ) {
   console.log(
-    `Received ${signal}`
+    `\n🛑 Received ${signal}. Shutting down...`
   );
 
-  bot.stop(signal);
+  try {
+    bot.stop(signal);
+  } catch {}
 
-  await closeRedis();
+  try {
+    await closeRedis();
+  } catch (error) {
+    console.error(
+      "Redis shutdown error:",
+      error
+    );
+  }
 
-  await disconnectDatabase();
+  try {
+    await disconnectDatabase();
+  } catch (error) {
+    console.error(
+      "Database shutdown error:",
+      error
+    );
+  }
+
+  console.log(
+    "✅ Shutdown complete"
+  );
 
   process.exit(0);
 }
 
 process.once(
   "SIGINT",
-  () => void shutdown("SIGINT")
+  () => {
+    void shutdown("SIGINT");
+  }
 );
 
 process.once(
   "SIGTERM",
-  () => void shutdown("SIGTERM")
+  () => {
+    void shutdown("SIGTERM");
+  }
 );
 
-main().catch(async error => {
-  console.error(
-    "Fatal startup error:",
-    error
-  );
+/*
+|--------------------------------------------------------------------------
+| RUN
+|--------------------------------------------------------------------------
+*/
 
-  await closeRedis();
+main().catch(
+  async (error) => {
+    console.error(
+      "🔥 Fatal startup error:",
+      error
+    );
 
-  await disconnectDatabase();
+    try {
+      await closeRedis();
+    } catch {}
 
-  process.exit(1);
-});
+    try {
+      await disconnectDatabase();
+    } catch {}
+
+    process.exit(1);
+  }
+);
