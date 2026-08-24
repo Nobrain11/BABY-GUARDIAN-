@@ -15,15 +15,13 @@ export const config = {
 
   databaseUrl: required("DATABASE_URL"),
 
-  redisUrl:
-    process.env.REDIS_URL ||
-    "redis://localhost:6379",
+  redisUrl: required("REDIS_URL"),
 
-  port:
-    Number(process.env.PORT) || 3000,
+  port: Number(process.env.PORT || 3000),
 
-  dashboardSecret:
-    required("DASHBOARD_SECRET"),
+  dashboardSecret: required(
+    "DASHBOARD_SECRET"
+  ),
 
   logChatId:
     process.env.LOG_CHAT_ID || "",
@@ -31,6 +29,6 @@ export const config = {
   adminIds:
     (process.env.ADMIN_IDS || "")
       .split(",")
-      .map(x => x.trim())
+      .map((id) => id.trim())
       .filter(Boolean)
 };
