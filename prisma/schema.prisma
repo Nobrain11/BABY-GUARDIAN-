@@ -7,6 +7,12 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+/*
+|--------------------------------------------------------------------------
+| GROUP
+|--------------------------------------------------------------------------
+*/
+
 model Group {
   id                String   @id @default(cuid())
   telegramId        String   @unique
@@ -29,26 +35,66 @@ model Group {
 
   blockedWords      String   @default("free eth,double your,send eth,send crypto,claim reward,airdrop now,connect wallet")
 
-  // BUY BOT
+  /*
+  |--------------------------------------------------------------------------
+  | BUY BOT SETTINGS
+  |--------------------------------------------------------------------------
+  */
+
   buyBotEnabled     Boolean  @default(false)
-  buyBotMinEth      Float    @default(0.1)
-  buyBotWhaleEth    Float    @default(2.0)
+
+  buyBotMinEth      Decimal  @default(0.01) @db.Decimal(30, 18)
+
+  buyBotWhaleEth    Decimal  @default(1) @db.Decimal(30, 18)
 
   buyBotShowWallet  Boolean  @default(true)
-  buyBotShowUsd     Boolean  @default(false)
+
+  buyBotShowUsd     Boolean  @default(true)
+
   buyBotShowTx      Boolean  @default(true)
+
+  buyBotShowAmount  Boolean  @default(true)
+
+  buyBotEmoji       String   @default("🍼")
+
+  buyBotChannel     String?
+
+  /*
+  |--------------------------------------------------------------------------
+  | WALLET VERIFICATION
+  |--------------------------------------------------------------------------
+  */
+
+  walletVerificationEnabled Boolean @default(false)
+
+  /*
+  |--------------------------------------------------------------------------
+  | TIMESTAMPS
+  |--------------------------------------------------------------------------
+  */
 
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+
+  /*
+  |--------------------------------------------------------------------------
+  | RELATIONS
+  |--------------------------------------------------------------------------
+  */
 
   members           Member[]
   warnings          Warning[]
   logs              AuditLog[]
   events            GroupEvent[]
   buyAlerts         BuyAlert[]
-
-  @@index([createdAt])
+  walletVerifications WalletVerification[]
 }
+
+/*
+|--------------------------------------------------------------------------
+| MEMBER
+|--------------------------------------------------------------------------
+*/
 
 model Member {
   id             String    @id @default(cuid())
@@ -63,38 +109,69 @@ model Member {
   role           String    @default("member")
 
   warnings       Int       @default(0)
+
   xp             Int       @default(0)
+
   messages       Int       @default(0)
 
   joinedAt       DateTime  @default(now())
+
   lastMessageAt  DateTime?
 
-  group          Group     @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group          Group     @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   warningsLog    Warning[]
+
+  walletVerifications WalletVerification[]
 
   @@unique([groupId, telegramId])
   @@index([groupId])
   @@index([telegramId])
 }
 
+/*
+|--------------------------------------------------------------------------
+| WARNING
+|--------------------------------------------------------------------------
+*/
+
 model Warning {
-  id           String   @id @default(cuid())
+  id            String   @id @default(cuid())
 
-  groupId      String
-  memberId     String
+  groupId       String
+  memberId      String
 
-  reason       String
-  moderatorId  String?
+  reason        String
 
-  createdAt    DateTime @default(now())
+  moderatorId   String?
 
-  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  member       Member   @relation(fields: [memberId], references: [id], onDelete: Cascade)
+  createdAt     DateTime @default(now())
+
+  group         Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  member        Member   @relation(
+    fields: [memberId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId])
   @@index([memberId])
 }
+
+/*
+|--------------------------------------------------------------------------
+| AUDIT LOG
+|--------------------------------------------------------------------------
+*/
 
 model AuditLog {
   id          String   @id @default(cuid())
@@ -102,67 +179,147 @@ model AuditLog {
   groupId     String
 
   actorId     String?
+
   targetId    String?
 
   action      String
+
   details     String?
 
   createdAt   DateTime @default(now())
 
-  group       Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
-
-  @@index([groupId, createdAt])
-}
-
-model GroupEvent {
-  id           String   @id @default(cuid())
-
-  groupId      String
-
-  type         String
-  telegramId   String?
-  payload      String?
-
-  createdAt    DateTime @default(now())
-
-  group        Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group       Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId, createdAt])
 }
 
 /*
 |--------------------------------------------------------------------------
-| BUY ALERTS
+| GROUP EVENTS
 |--------------------------------------------------------------------------
 */
 
-model BuyAlert {
-  id             String   @id @default(cuid())
+model GroupEvent {
+  id          String   @id @default(cuid())
 
-  groupId        String
+  groupId     String
 
-  txHash         String   @unique
+  type        String
 
-  buyerAddress   String
+  telegramId  String?
 
-  tokenAddress   String?
+  payload     String?
 
-  amountEth      Float
+  createdAt   DateTime @default(now())
 
-  tokenAmount    String?
-
-  blockNumber    BigInt?
-
-  usdValue       Float?
-
-  isWhale        Boolean  @default(false)
-
-  createdAt      DateTime @default(now())
-
-  group          Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group       Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
 
   @@index([groupId, createdAt])
-  @@index([buyerAddress])
-  @@index([tokenAddress])
-  @@index([isWhale])
+}
+
+/*
+|--------------------------------------------------------------------------
+| BUY ALERT
+|--------------------------------------------------------------------------
+|
+| Stores every detected BABY purchase that gets processed
+| by the Telegram buy bot.
+|
+*/
+
+model BuyAlert {
+  id                 String   @id @default(cuid())
+
+  groupId            String
+
+  txHash             String
+
+  buyer              String
+
+  amountEth          Decimal  @db.Decimal(30, 18)
+
+  amountUsd          Decimal? @db.Decimal(30, 18)
+
+  tokenAmount        Decimal? @db.Decimal(50, 18)
+
+  blockNumber        BigInt?
+
+  timestamp          DateTime @default(now())
+
+  telegramMessageId  Int?
+
+  isWhale            Boolean  @default(false)
+
+  createdAt          DateTime @default(now())
+
+  updatedAt          DateTime @updatedAt
+
+  group              Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  @@unique([groupId, txHash])
+  @@index([groupId, createdAt])
+  @@index([buyer])
+  @@index([txHash])
+}
+
+/*
+|--------------------------------------------------------------------------
+| WALLET VERIFICATION
+|--------------------------------------------------------------------------
+*/
+
+model WalletVerification {
+  id              String   @id @default(cuid())
+
+  groupId         String
+
+  memberId        String
+
+  telegramId      String
+
+  walletAddress   String
+
+  chainId         Int      @default(4663)
+
+  message         String?
+
+  signature       String?
+
+  status          String   @default("pending")
+
+  verifiedAt      DateTime?
+
+  createdAt       DateTime @default(now())
+
+  updatedAt       DateTime @updatedAt
+
+  group           Group    @relation(
+    fields: [groupId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  member          Member   @relation(
+    fields: [memberId],
+    references: [id],
+    onDelete: Cascade
+  )
+
+  @@index([groupId])
+  @@index([memberId])
+  @@index([telegramId])
+  @@index([walletAddress])
+  @@unique([groupId, walletAddress])
 }
