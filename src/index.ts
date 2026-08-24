@@ -1,10 +1,6 @@
-import {
-  Telegraf
-} from "telegraf";
+import { Telegraf } from "telegraf";
 
-import {
-  config
-} from "./config.js";
+import { config } from "./config.js";
 
 import {
   prisma,
@@ -37,12 +33,18 @@ import {
 } from "./services/moderation.js";
 
 import {
+  handleMemberJoin
+} from "./services/raid.js";
+
+import {
   registerAdminPanel
 } from "./bot/adminPanel.js";
+
 
 const bot = new Telegraf(
   config.botToken
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -72,11 +74,13 @@ async function requireAdmin(
   return admin;
 }
 
+
 function getReplyTarget(
   ctx: any
 ) {
   return ctx.message?.reply_to_message?.from;
 }
+
 
 async function getGroup(
   chatId: number,
@@ -87,6 +91,7 @@ async function getGroup(
     title
   );
 }
+
 
 /*
 |--------------------------------------------------------------------------
@@ -107,6 +112,7 @@ bot.start(async (ctx) => {
     ].join("\n")
   );
 });
+
 
 /*
 |--------------------------------------------------------------------------
@@ -146,6 +152,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | RULES
@@ -168,6 +175,7 @@ bot.command(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -231,6 +239,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | RANK
@@ -274,6 +283,7 @@ bot.command(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -409,6 +419,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | WARNINGS
@@ -452,6 +463,7 @@ bot.command(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -504,6 +516,7 @@ bot.command(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -613,6 +626,7 @@ async function changeMute(
   }
 }
 
+
 bot.command(
   "mute",
   (ctx) => changeMute(ctx, true)
@@ -622,6 +636,7 @@ bot.command(
   "unmute",
   (ctx) => changeMute(ctx, false)
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -699,6 +714,7 @@ bot.command(
     }
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -782,6 +798,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | UNBAN
@@ -861,6 +878,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | LOCKDOWN
@@ -910,6 +928,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | UNLOCK
@@ -954,6 +973,7 @@ bot.command(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1021,6 +1041,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | SET RULES
@@ -1085,6 +1106,7 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | SETTINGS
@@ -1125,26 +1147,32 @@ bot.command(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
-| NEW MEMBERS
+| NEW MEMBERS / ANTI-RAID
 |--------------------------------------------------------------------------
 */
 
 bot.on(
   "new_chat_members",
   async (ctx) => {
-    if (!ctx.chat) return;
+    if (!ctx.chat) {
+      return;
+    }
+
+    /*
+     * IMPORTANT:
+     *
+     * Do not use ctx.chat.title here.
+     * Telegraf's Chat type can also be PrivateChat.
+     */
 
     const group =
       await getGroup(
         ctx.chat.id,
-        ctx.chat.title || "BABY"
+        "BABY"
       );
-
-    if (!group.welcomeEnabled) {
-      return;
-    }
 
     for (
       const member
@@ -1155,13 +1183,32 @@ bot.on(
         member
       );
 
-      await ctx.reply(
-        [
-          group.welcomeMessage,
-          "",
-          `🍼 Welcome, ${member.first_name}!`
-        ].join("\n")
+      /*
+       * Anti-raid detection
+       */
+
+      await handleMemberJoin(
+        bot,
+        ctx.chat.id,
+        member.id
       );
+
+      /*
+       * Welcome message
+       */
+
+      if (
+        group.welcomeEnabled &&
+        !group.lockdown
+      ) {
+        await ctx.reply(
+          [
+            group.welcomeMessage,
+            "",
+            `🍼 Welcome, ${member.first_name}!`
+          ].join("\n")
+        );
+      }
 
       await audit(
         bot,
@@ -1174,6 +1221,7 @@ bot.on(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | LEFT MEMBER
@@ -1183,7 +1231,9 @@ bot.on(
 bot.on(
   "left_chat_member",
   async (ctx) => {
-    if (!ctx.chat) return;
+    if (!ctx.chat) {
+      return;
+    }
 
     const group =
       await getGroup(
@@ -1219,6 +1269,7 @@ bot.on(
   }
 );
 
+
 /*
 |--------------------------------------------------------------------------
 | MESSAGE MODERATION
@@ -1235,12 +1286,20 @@ bot.on(
       return;
     }
 
+    /*
+     * Only moderate groups.
+     */
+
     if (
       ctx.chat.type !== "group" &&
       ctx.chat.type !== "supergroup"
     ) {
       return;
     }
+
+    /*
+     * Ignore Telegram service messages.
+     */
 
     if (
       "new_chat_members" in
@@ -1256,9 +1315,16 @@ bot.on(
       return;
     }
 
+    /*
+     * Do NOT use ctx.chat.title.
+     *
+     * We deliberately use "BABY" here because
+     * Telegram's Chat union does not guarantee title.
+     */
+
     await getGroup(
       ctx.chat.id,
-      ctx.chat.title
+      "BABY"
     );
 
     await moderate(
@@ -1269,6 +1335,7 @@ bot.on(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1284,6 +1351,7 @@ bot.catch(
     );
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1308,7 +1376,9 @@ async function main() {
     "⚡ Redis connection verified"
   );
 
-  registerAdminPanel(bot);
+  registerAdminPanel(
+    bot
+  );
 
   const me =
     await bot.telegram.getMe();
@@ -1323,6 +1393,7 @@ async function main() {
     "🟢 BABY Group Manager running"
   );
 }
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1366,6 +1437,7 @@ async function shutdown(
   process.exit(0);
 }
 
+
 process.once(
   "SIGINT",
   () => {
@@ -1373,12 +1445,14 @@ process.once(
   }
 );
 
+
 process.once(
   "SIGTERM",
   () => {
     void shutdown("SIGTERM");
   }
 );
+
 
 /*
 |--------------------------------------------------------------------------
