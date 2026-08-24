@@ -1,866 +1,626 @@
-import {
-  Contract,
-  JsonRpcProvider,
-  Interface,
-  Log,
-  formatUnits
-} from "ethers";
+import { ethers } from "ethers";
+import { prisma } from "../db.js";
+import { config } from "../config.js";
 
-import {
-  config
-} from "../config.js";
+const provider = new ethers.JsonRpcProvider(config.robinhoodRpcUrl);
 
-import {
-  prisma
-} from "../db.js";
-
-import type {
-  Telegram
-} from "telegraf";
-
-const RPC_URL =
-  process.env.RPC_URL ||
-  "https://rpc.mainnet.chain.robinhood.com";
-
-const CHAIN_ID =
-  Number(
-    process.env.CHAIN_ID || 4663
-  );
-
-const BABY_ADDRESS =
-  process.env.BABY_CONTRACT_ADDRESS ||
-  "0x9f4A9C70d10F4Fa88d9db84AFdc6B8b44f3E81a1";
-
-const provider =
-  new JsonRpcProvider(
-    RPC_URL,
-    {
-      chainId: CHAIN_ID,
-      name: "Robinhood Chain"
-    }
-  );
-
-const ERC20_ABI = [
-  "function symbol() view returns (string)",
-  "function decimals() view returns (uint8)",
-  "function balanceOf(address) view returns (uint256)"
+const BUY_ABI = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)"
 ];
 
-const token =
-  new Contract(
-    BABY_ADDRESS,
-    ERC20_ABI,
-    provider
-  );
+type BuyBotSettings = {
+  buyBotEnabled: boolean;
+  buyBotMinEth: number;
+  buyBotWhaleEth: number;
+  buyBotShowWallet: boolean;
+  buyBotShowUsd: boolean;
+  buyBotShowTx: boolean;
+};
 
-/*
-|--------------------------------------------------------------------------
-| STATE
-|--------------------------------------------------------------------------
-*/
+type BuyAlertData = {
+  groupId: string;
+  txHash: string;
+  buyer: string;
+  tokenAddress: string;
+  nativeAmount: number;
+  tokenAmount?: string;
+  usdValue?: number;
+  tokenSymbol?: string;
+  tokenName?: string;
+  blockNumber?: bigint;
+  telegramMessageId?: number;
+  isWhale?: boolean;
+};
 
-let running = false;
-
-let timer:
-  ReturnType<typeof setInterval> |
-  undefined;
-
-let lastBlock = 0;
-
-/*
-|--------------------------------------------------------------------------
-| CONFIG
-|--------------------------------------------------------------------------
-*/
-
-const MIN_BUY =
-  Number(
-    process.env.BUY_BOT_MIN_ETH || 0.1
-  );
-
-const WHALE_BUY =
-  Number(
-    process.env.BUY_BOT_WHALE_ETH || 2
-  );
-
-const CONFIRMATIONS =
-  Number(
-    process.env.BUY_BOT_CONFIRMATIONS || 1
-  );
-
-/*
-|--------------------------------------------------------------------------
-| HELPERS
-|--------------------------------------------------------------------------
-*/
-
-function getTelegramGroupId(
-  telegramId: string
-): number | null {
-  const value =
-    Number(telegramId);
-
-  if (
-    !Number.isSafeInteger(value)
-  ) {
-    return null;
-  }
-
-  return value;
+function normalizeAddress(address: string): string {
+  return address.toLowerCase();
 }
 
-async function getTokenMetadata() {
-  let symbol = "BABY";
-  let decimals = 18;
+function formatEth(value: number): string {
+  if (!Number.isFinite(value)) return "0";
 
-  try {
-    const symbolFunction =
-      token.getFunction("symbol");
-
-    if (symbolFunction) {
-      const result =
-        await symbolFunction();
-
-      if (
-        typeof result === "string" &&
-        result.length > 0
-      ) {
-        symbol = result;
-      }
-    }
-  } catch (error) {
-    console.error(
-      "Unable to read token symbol:",
-      error
-    );
+  if (value >= 1000) {
+    return value.toLocaleString("en-US", {
+      maximumFractionDigits: 2
+    });
   }
 
-  try {
-    const decimalsFunction =
-      token.getFunction("decimals");
-
-    if (decimalsFunction) {
-      const result =
-        await decimalsFunction();
-
-      decimals =
-        Number(result);
-    }
-  } catch (error) {
-    console.error(
-      "Unable to read token decimals:",
-      error
-    );
+  if (value >= 1) {
+    return value.toLocaleString("en-US", {
+      maximumFractionDigits: 4
+    });
   }
 
-  return {
-    symbol,
-    decimals
-  };
+  return value.toLocaleString("en-US", {
+    maximumFractionDigits: 6
+  });
 }
 
-/*
-|--------------------------------------------------------------------------
-| LOG PARSER
-|--------------------------------------------------------------------------
-*/
-
-function parseLog(
-  log: Log
-) {
-  /*
-   * We deliberately use Interface.parseLog()
-   * instead of assuming `log.args` exists.
-   *
-   * In ethers v6:
-   * Log does NOT have args.
-   * EventLog may have args.
-   */
-
-  const iface =
-    new Interface([
-      "event Transfer(address indexed from,address indexed to,uint256 value)"
-    ]);
-
-  try {
-    const parsed =
-      iface.parseLog({
-        topics: log.topics,
-        data: log.data
-      });
-
-    if (!parsed) {
-      return null;
-    }
-
-    if (
-      parsed.name !==
-      "Transfer"
-    ) {
-      return null;
-    }
-
-    const from =
-      String(
-        parsed.args[0]
-      );
-
-    const to =
-      String(
-        parsed.args[1]
-      );
-
-    const value =
-      parsed.args[2];
-
-    return {
-      from,
-      to,
-      value
-    };
-  } catch {
-    return null;
-  }
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
 }
 
-/*
-|--------------------------------------------------------------------------
-| GROUPS
-|--------------------------------------------------------------------------
-*/
+function shortenAddress(address: string): string {
+  if (address.length < 12) return address;
 
-async function getEnabledGroups() {
-  return prisma.group.findMany({
+  return `${address.slice(0, 6)}...${address.slice(-4)}`;
+}
+
+function getExplorerTxUrl(txHash: string): string {
+  const base =
+    process.env.ROBINHOOD_EXPLORER_URL ||
+    "https://explorer.mainnet.chain.robinhood.com";
+
+  return `${base.replace(/\/$/, "")}/tx/${txHash}`;
+}
+
+function getExplorerAddressUrl(address: string): string {
+  const base =
+    process.env.ROBINHOOD_EXPLORER_URL ||
+    "https://explorer.mainnet.chain.robinhood.com";
+
+  return `${base.replace(/\/$/, "")}/address/${address}`;
+}
+
+export async function getBuyBotSettings(
+  groupId: string
+): Promise<BuyBotSettings | null> {
+  const group = await prisma.group.findUnique({
     where: {
-      buyBotEnabled: true
+      id: groupId
+    },
+    select: {
+      buyBotEnabled: true,
+      buyBotMinEth: true,
+      buyBotWhaleEth: true,
+      buyBotShowWallet: true,
+      buyBotShowUsd: true,
+      buyBotShowTx: true
+    }
+  });
+
+  return group;
+}
+
+export async function updateBuyBotSettings(
+  groupId: string,
+  settings: Partial<BuyBotSettings>
+) {
+  return prisma.group.update({
+    where: {
+      id: groupId
+    },
+    data: {
+      ...(settings.buyBotEnabled !== undefined && {
+        buyBotEnabled: settings.buyBotEnabled
+      }),
+
+      ...(settings.buyBotMinEth !== undefined && {
+        buyBotMinEth: Number(settings.buyBotMinEth)
+      }),
+
+      ...(settings.buyBotWhaleEth !== undefined && {
+        buyBotWhaleEth: Number(settings.buyBotWhaleEth)
+      }),
+
+      ...(settings.buyBotShowWallet !== undefined && {
+        buyBotShowWallet: settings.buyBotShowWallet
+      }),
+
+      ...(settings.buyBotShowUsd !== undefined && {
+        buyBotShowUsd: settings.buyBotShowUsd
+      }),
+
+      ...(settings.buyBotShowTx !== undefined && {
+        buyBotShowTx: settings.buyBotShowTx
+      })
     }
   });
 }
 
-/*
-|--------------------------------------------------------------------------
-| SEND BUY ALERT
-|--------------------------------------------------------------------------
-*/
-
-async function sendBuyAlert(
-  telegram: Telegram,
-  group: {
-    id: string;
-    telegramId: string;
-    buyBotMinEth: number;
-    buyBotWhaleEth: number;
-    buyBotShowWallet: boolean;
-    buyBotShowUsd: boolean;
-    buyBotShowTx: boolean;
-    buyBotShowTokenAmount: boolean;
-    buyBotShowNativeAmount: boolean;
-  },
-  buyer: string,
-  tokenAmount: bigint,
-  nativeAmount: number,
-  txHash: string,
-  blockNumber: bigint
-) {
-  if (
-    nativeAmount <
-    group.buyBotMinEth
-  ) {
-    return;
-  }
-
-  const isWhale =
-    nativeAmount >=
-    group.buyBotWhaleEth;
-
-  const metadata =
-    await getTokenMetadata();
-
-  const tokenDisplay =
-    formatUnits(
-      tokenAmount,
-      metadata.decimals
-    );
-
-  /*
-   * Prevent duplicate alerts.
-   */
-
-  const existing =
-    await prisma.buyAlert.findUnique({
-      where: {
-        groupId_txHash: {
-          groupId: group.id,
-          txHash
-        }
-      }
-    });
-
-  if (existing) {
-    return;
-  }
-
-  const alert =
-    await prisma.buyAlert.create({
-      data: {
-        groupId: group.id,
-        txHash,
-        blockNumber,
-        buyer,
-        tokenAmount:
-          tokenDisplay,
-        nativeAmount:
-          nativeAmount.toString(),
-        isWhale,
-        confirmed:
-          CONFIRMATIONS <= 1,
-        confirmedAt:
-          CONFIRMATIONS <= 1
-            ? new Date()
-            : null
-      }
-    });
-
-  const lines: string[] = [];
-
-  if (isWhale) {
-    lines.push(
-      "🐋🍼💚 BABY WHALE BUY"
-    );
-  } else {
-    lines.push(
-      "🍼💚 BABY BUY"
-    );
-  }
-
-  lines.push("");
-  lines.push(
-    `💰 Buy: ${nativeAmount.toFixed(4)} ETH`
-  );
-
-  if (
-    group.buyBotShowTokenAmount
-  ) {
-    lines.push(
-      `🍼 Received: ${tokenDisplay} ${metadata.symbol}`
-    );
-  }
-
-  if (
-    group.buyBotShowWallet
-  ) {
-    lines.push(
-      `👛 Buyer: ${buyer}`
-    );
-  }
-
-  if (
-    group.buyBotShowTx
-  ) {
-    lines.push(
-      `🔗 TX: https://robinhoodchain.blockscout.com/tx/${txHash}`
-    );
-  }
-
-  lines.push("");
-  lines.push(
-    "🍼 BABY is growing."
-  );
-
-  const chatId =
-    getTelegramGroupId(
-      group.telegramId
-    );
-
-  if (chatId === null) {
-    console.error(
-      "Invalid Telegram group ID:",
-      group.telegramId
-    );
-
-    return;
-  }
-
-  try {
-    const message =
-      await telegram.sendMessage(
-        chatId,
-        lines.join("\n")
-      );
-
-    await prisma.buyAlert.update({
-      where: {
-        id: alert.id
-      },
-      data: {
-        telegramMessageId:
-          message.message_id
-      }
-    });
-  } catch (error) {
-    console.error(
-      `Unable to send Buy Bot alert to ${group.telegramId}:`,
-      error
-    );
-  }
+export async function enableBuyBot(groupId: string) {
+  return updateBuyBotSettings(groupId, {
+    buyBotEnabled: true
+  });
 }
 
-/*
-|--------------------------------------------------------------------------
-| PROCESS BLOCK
-|--------------------------------------------------------------------------
-*/
+export async function disableBuyBot(groupId: string) {
+  return updateBuyBotSettings(groupId, {
+    buyBotEnabled: false
+  });
+}
 
-async function processBlock(
-  blockNumber: number,
-  telegram: Telegram
+export async function setBuyBotMinimum(
+  groupId: string,
+  amount: number
 ) {
-  const groups =
-    await getEnabledGroups();
-
-  if (
-    groups.length === 0
-  ) {
-    return;
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error("Invalid minimum buy amount");
   }
 
-  const logs =
-    await provider.getLogs({
-      address:
-        BABY_ADDRESS,
-      fromBlock:
-        blockNumber,
-      toBlock:
-        blockNumber
-    });
+  return updateBuyBotSettings(groupId, {
+    buyBotMinEth: amount
+  });
+}
 
-  for (
-    const log
-    of logs
+export async function setBuyBotWhaleThreshold(
+  groupId: string,
+  amount: number
+) {
+  if (!Number.isFinite(amount) || amount < 0) {
+    throw new Error("Invalid whale threshold");
+  }
+
+  return updateBuyBotSettings(groupId, {
+    buyBotWhaleEth: amount
+  });
+}
+
+export async function saveBuyAlert(data: BuyAlertData) {
+  return prisma.buyAlert.upsert({
+    where: {
+      groupId_txHash: {
+        groupId: data.groupId,
+        txHash: data.txHash
+      }
+    },
+
+    create: {
+      groupId: data.groupId,
+      txHash: data.txHash,
+      buyer: data.buyer,
+      tokenAddress: data.tokenAddress,
+
+      // IMPORTANT:
+      // Prisma schema uses Float, so this MUST be a number.
+      nativeAmount: Number(data.nativeAmount),
+
+      tokenAmount: data.tokenAmount,
+      usdValue:
+        data.usdValue !== undefined
+          ? Number(data.usdValue)
+          : undefined,
+
+      tokenSymbol: data.tokenSymbol,
+      tokenName: data.tokenName,
+
+      blockNumber: data.blockNumber,
+
+      telegramMessageId: data.telegramMessageId,
+
+      isWhale: data.isWhale ?? false
+    },
+
+    update: {
+      buyer: data.buyer,
+      tokenAddress: data.tokenAddress,
+
+      nativeAmount: Number(data.nativeAmount),
+
+      tokenAmount: data.tokenAmount,
+
+      usdValue:
+        data.usdValue !== undefined
+          ? Number(data.usdValue)
+          : undefined,
+
+      tokenSymbol: data.tokenSymbol,
+      tokenName: data.tokenName,
+
+      blockNumber: data.blockNumber,
+
+      telegramMessageId: data.telegramMessageId,
+
+      isWhale: data.isWhale ?? false
+    }
+  });
+}
+
+export async function findBuyAlert(
+  groupId: string,
+  txHash: string
+) {
+  return prisma.buyAlert.findUnique({
+    where: {
+      groupId_txHash: {
+        groupId,
+        txHash
+      }
+    }
+  });
+}
+
+export async function deleteBuyAlert(
+  groupId: string,
+  txHash: string
+) {
+  return prisma.buyAlert.deleteMany({
+    where: {
+      groupId,
+      txHash
+    }
+  });
+}
+
+export async function getRecentBuyAlerts(
+  groupId: string,
+  limit = 20
+) {
+  return prisma.buyAlert.findMany({
+    where: {
+      groupId
+    },
+    orderBy: {
+      timestamp: "desc"
+    },
+    take: Math.min(Math.max(limit, 1), 100)
+  });
+}
+
+export async function getRecentWhaleBuys(
+  groupId: string,
+  limit = 20
+) {
+  return prisma.buyAlert.findMany({
+    where: {
+      groupId,
+      isWhale: true
+    },
+    orderBy: {
+      timestamp: "desc"
+    },
+    take: Math.min(Math.max(limit, 1), 100)
+  });
+}
+
+export async function getBuyStats(groupId: string) {
+  const alerts = await prisma.buyAlert.findMany({
+    where: {
+      groupId
+    },
+    select: {
+      nativeAmount: true,
+      isWhale: true
+    }
+  });
+
+  let totalVolume = 0;
+  let whaleVolume = 0;
+  let whaleCount = 0;
+
+  for (const alert of alerts) {
+    const amount = Number(alert.nativeAmount);
+
+    if (!Number.isFinite(amount)) continue;
+
+    totalVolume += amount;
+
+    if (alert.isWhale) {
+      whaleVolume += amount;
+      whaleCount++;
+    }
+  }
+
+  return {
+    totalBuys: alerts.length,
+    totalVolume,
+    whaleVolume,
+    whaleCount
+  };
+}
+
+export function isWhaleBuy(
+  nativeAmount: number,
+  whaleThreshold: number
+): boolean {
+  return (
+    Number.isFinite(nativeAmount) &&
+    Number.isFinite(whaleThreshold) &&
+    nativeAmount >= whaleThreshold
+  );
+}
+
+export function meetsMinimumBuy(
+  nativeAmount: number,
+  minimum: number
+): boolean {
+  return (
+    Number.isFinite(nativeAmount) &&
+    Number.isFinite(minimum) &&
+    nativeAmount >= minimum
+  );
+}
+
+export function buildBuyAlertMessage(
+  alert: BuyAlertData,
+  settings: BuyBotSettings
+): string {
+  const whale = Boolean(
+    alert.isWhale ??
+      isWhaleBuy(
+        Number(alert.nativeAmount),
+        Number(settings.buyBotWhaleEth)
+      )
+  );
+
+  const emoji = whale ? "🐋" : "🟢";
+
+  const amount = Number(alert.nativeAmount);
+
+  let message = `${emoji} <b>${whale ? "WHALE BUY" : "BUY ALERT"}</b>\n\n`;
+
+  message += `🍼 <b>${
+    escapeHtml(alert.tokenSymbol || "BABY")
+  }</b>`;
+
+  if (alert.tokenName) {
+    message += ` — ${escapeHtml(alert.tokenName)}`;
+  }
+
+  message += "\n\n";
+
+  message += `💰 Buy: <b>${formatEth(amount)} ETH</b>\n`;
+
+  if (
+    settings.buyBotShowUsd &&
+    alert.usdValue !== undefined &&
+    Number.isFinite(Number(alert.usdValue))
   ) {
-    /*
-     * Only standard ethers Log is
-     * expected here.
-     */
+    message += `💵 Value: <b>$${Number(alert.usdValue).toLocaleString(
+      "en-US",
+      {
+        maximumFractionDigits: 2
+      }
+    )}</b>\n`;
+  }
 
-    const parsed =
-      parseLog(log);
+  if (settings.buyBotShowWallet) {
+    message += `👛 Buyer: <a href="${getExplorerAddressUrl(
+      alert.buyer
+    )}">${escapeHtml(shortenAddress(alert.buyer))}</a>\n`;
+  }
 
-    if (!parsed) {
+  message += `🪙 Token: <code>${escapeHtml(
+    alert.tokenAddress
+  )}</code>\n`;
+
+  if (settings.buyBotShowTx) {
+    message += `\n🔗 <a href="${getExplorerTxUrl(
+      alert.txHash
+    )}">View Transaction</a>`;
+  }
+
+  return message;
+}
+
+export async function processBuy(
+  groupId: string,
+  data: {
+    txHash: string;
+    buyer: string;
+    tokenAddress: string;
+    nativeAmount: number | string;
+    tokenAmount?: string;
+    usdValue?: number | string;
+    tokenSymbol?: string;
+    tokenName?: string;
+    blockNumber?: bigint;
+  }
+) {
+  const settings = await getBuyBotSettings(groupId);
+
+  if (!settings) {
+    return {
+      ignored: true,
+      reason: "GROUP_NOT_FOUND"
+    };
+  }
+
+  if (!settings.buyBotEnabled) {
+    return {
+      ignored: true,
+      reason: "BUYBOT_DISABLED"
+    };
+  }
+
+  const nativeAmount = Number(data.nativeAmount);
+
+  if (!Number.isFinite(nativeAmount)) {
+    return {
+      ignored: true,
+      reason: "INVALID_NATIVE_AMOUNT"
+    };
+  }
+
+  if (
+    !meetsMinimumBuy(
+      nativeAmount,
+      Number(settings.buyBotMinEth)
+    )
+  ) {
+    return {
+      ignored: true,
+      reason: "BELOW_MINIMUM"
+    };
+  }
+
+  const whale = isWhaleBuy(
+    nativeAmount,
+    Number(settings.buyBotWhaleEth)
+  );
+
+  const alert = await saveBuyAlert({
+    groupId,
+    txHash: data.txHash,
+    buyer: normalizeAddress(data.buyer),
+    tokenAddress: normalizeAddress(data.tokenAddress),
+
+    // Always convert to number before Prisma.
+    nativeAmount,
+
+    tokenAmount: data.tokenAmount,
+
+    usdValue:
+      data.usdValue !== undefined
+        ? Number(data.usdValue)
+        : undefined,
+
+    tokenSymbol: data.tokenSymbol,
+    tokenName: data.tokenName,
+
+    blockNumber: data.blockNumber,
+
+    isWhale: whale
+  });
+
+  const message = buildBuyAlertMessage(
+    {
+      groupId,
+      txHash: alert.txHash,
+      buyer: alert.buyer,
+      tokenAddress: alert.tokenAddress,
+      nativeAmount: Number(alert.nativeAmount),
+      tokenAmount: alert.tokenAmount ?? undefined,
+      usdValue: alert.usdValue ?? undefined,
+      tokenSymbol: alert.tokenSymbol ?? undefined,
+      tokenName: alert.tokenName ?? undefined,
+      blockNumber: alert.blockNumber ?? undefined,
+      telegramMessageId:
+        alert.telegramMessageId ?? undefined,
+      isWhale: alert.isWhale
+    },
+    settings
+  );
+
+  return {
+    ignored: false,
+    whale,
+    alert,
+    message
+  };
+}
+
+export async function scanTransaction(
+  txHash: string,
+  tokenAddress: string
+) {
+  const receipt = await provider.getTransactionReceipt(txHash);
+
+  if (!receipt) {
+    return [];
+  }
+
+  const token = normalizeAddress(tokenAddress);
+
+  const iface = new ethers.Interface(BUY_ABI);
+
+  const buys: Array<{
+    txHash: string;
+    buyer: string;
+    tokenAddress: string;
+    nativeAmount: number;
+    tokenAmount: string;
+    blockNumber: bigint;
+  }> = [];
+
+  for (const log of receipt.logs) {
+    if (
+      normalizeAddress(log.address) !== token
+    ) {
       continue;
     }
 
-    /*
-     * A normal Transfer event does NOT
-     * automatically mean a BUY.
-     *
-     * This is deliberately kept conservative.
-     *
-     * We need the actual BABY pool address
-     * and Swap event before classifying
-     * transfers as purchases.
-     */
-
-    const buyer =
-      parsed.to;
-
-    const tokenAmount =
-      parsed.value;
-
-    /*
-     * We currently cannot determine the
-     * actual ETH spent from a Transfer event.
-     *
-     * Therefore don't generate a fake buy.
-     */
-
-    console.log(
-      "BABY Transfer detected:",
-      {
-        txHash: log.transactionHash,
-        buyer,
-        tokenAmount:
-          tokenAmount.toString()
-      }
-    );
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| WATCHER
-|--------------------------------------------------------------------------
-*/
-
-export async function initializeBuyBot() {
-  console.log(
-    "🍼 Initializing BABY Buy Bot..."
-  );
-
-  try {
-    lastBlock =
-      await provider.getBlockNumber();
-
-    const network =
-      await provider.getNetwork();
-
-    console.log(
-      "🍼 Buy Bot network:",
-      {
-        chainId:
-          network.chainId.toString(),
-        block:
-          lastBlock,
-        contract:
-          BABY_ADDRESS
-      }
-    );
-
-    const metadata =
-      await getTokenMetadata();
-
-    console.log(
-      "🍼 Token:",
-      metadata
-    );
-  } catch (error) {
-    console.error(
-      "Buy Bot initialization failed:",
-      error
-    );
-
-    throw error;
-  }
-}
-
-/*
-|--------------------------------------------------------------------------
-| START
-|--------------------------------------------------------------------------
-*/
-
-export function startBuyBotWatcher(
-  telegram: Telegram
-) {
-  if (running) {
-    console.log(
-      "🍼 Buy Bot watcher already running"
-    );
-
-    return;
-  }
-
-  running = true;
-
-  console.log(
-    "🍼💚 Starting BABY blockchain watcher..."
-  );
-
-  timer =
-    setInterval(
-      async () => {
-        if (!running) {
-          return;
-        }
-
-        try {
-          const currentBlock =
-            await provider.getBlockNumber();
-
-          if (
-            currentBlock <=
-            lastBlock
-          ) {
-            return;
-          }
-
-          const start =
-            lastBlock + 1;
-
-          for (
-            let block = start;
-            block <= currentBlock;
-            block++
-          ) {
-            await processBlock(
-              block,
-              telegram
-            );
-          }
-
-          lastBlock =
-            currentBlock;
-        } catch (error) {
-          console.error(
-            "Buy Bot watcher error:",
-            error
-          );
-        }
-      },
-      3000
-    );
-}
-
-/*
-|--------------------------------------------------------------------------
-| STOP
-|--------------------------------------------------------------------------
-*/
-
-export function stopBuyBotWatcher() {
-  running = false;
-
-  if (timer) {
-    clearInterval(timer);
-    timer = undefined;
-  }
-
-  console.log(
-    "🛑 BABY Buy Bot watcher stopped"
-  );
-}
-
-/*
-|--------------------------------------------------------------------------
-| TELEGRAM COMMAND REGISTRATION
-|--------------------------------------------------------------------------
-*/
-
-export function registerBuyBot(
-  bot: any
-) {
-  /*
-   * /buybot
-   */
-
-  bot.command(
-    "buybot",
-    async (ctx: any) => {
-      if (!ctx.chat) {
-        return;
-      }
-
-      const group =
-        await prisma.group.findUnique({
-          where: {
-            telegramId:
-              String(ctx.chat.id)
-          }
-        });
-
-      if (!group) {
-        await ctx.reply(
-          "🍼 This group has not been initialized yet."
-        );
-
-        return;
-      }
-
-      await ctx.reply(
-        [
-          "🍼💚 BABY BUY BOT",
-          "",
-          `Status: ${group.buyBotEnabled ? "🟢 ON" : "🔴 OFF"}`,
-          `Minimum buy: ${group.buyBotMinEth} ETH`,
-          `Whale threshold: ${group.buyBotWhaleEth} ETH`,
-          "",
-          "Admin commands:",
-          "/buybot_on",
-          "/buybot_off",
-          "/buybot_min 0.1",
-          "/buybot_whale 2"
-        ].join("\n")
-      );
-    }
-  );
-
-  /*
-   * Enable
-   */
-
-  bot.command(
-    "buybot_on",
-    async (ctx: any) => {
-      if (!ctx.chat) {
-        return;
-      }
-
-      const group =
-        await prisma.group.findUnique({
-          where: {
-            telegramId:
-              String(ctx.chat.id)
-          }
-        });
-
-      if (!group) {
-        return;
-      }
-
-      await prisma.group.update({
-        where: {
-          id: group.id
-        },
-        data: {
-          buyBotEnabled:
-            true
-        }
+    try {
+      const parsed = iface.parseLog({
+        topics: [...log.topics],
+        data: log.data
       });
 
-      await ctx.reply(
-        "🍼💚 BABY Buy Bot enabled."
-      );
-    }
-  );
+      if (!parsed) continue;
 
-  /*
-   * Disable
-   */
+      if (parsed.name !== "Transfer") continue;
 
-  bot.command(
-    "buybot_off",
-    async (ctx: any) => {
-      if (!ctx.chat) {
-        return;
-      }
-
-      const group =
-        await prisma.group.findUnique({
-          where: {
-            telegramId:
-              String(ctx.chat.id)
-          }
-        });
-
-      if (!group) {
-        return;
-      }
-
-      await prisma.group.update({
-        where: {
-          id: group.id
-        },
-        data: {
-          buyBotEnabled:
-            false
-        }
-      });
-
-      await ctx.reply(
-        "🔴 BABY Buy Bot disabled."
-      );
-    }
-  );
-
-  /*
-   * Minimum buy
-   */
-
-  bot.command(
-    "buybot_min",
-    async (ctx: any) => {
-      if (!ctx.chat) {
-        return;
-      }
-
-      const value =
-        Number(
-          ctx.message.text
-            .split(/\s+/)[1]
-        );
+      const from = String(parsed.args[0]);
+      const to = String(parsed.args[1]);
+      const value = parsed.args[2] as bigint;
 
       if (
-        !Number.isFinite(value) ||
-        value <= 0
+        normalizeAddress(from) ===
+        "0x0000000000000000000000000000000000000000"
       ) {
-        await ctx.reply(
-          "Usage:\n/buybot_min 0.1"
-        );
-
-        return;
+        continue;
       }
 
-      const group =
-        await prisma.group.findUnique({
-          where: {
-            telegramId:
-              String(ctx.chat.id)
-          }
-        });
+      const tx = await provider.getTransaction(txHash);
 
-      if (!group) {
-        return;
-      }
+      if (!tx) continue;
 
-      await prisma.group.update({
-        where: {
-          id: group.id
-        },
-        data: {
-          buyBotMinEth:
-            value
-        }
-      });
-
-      await ctx.reply(
-        `✅ Minimum Buy Bot alert set to ${value} ETH.`
+      const nativeAmount = Number(
+        ethers.formatEther(tx.value)
       );
+
+      if (!Number.isFinite(nativeAmount)) {
+        continue;
+      }
+
+      buys.push({
+        txHash,
+        buyer: to,
+        tokenAddress: token,
+        nativeAmount,
+        tokenAmount: value.toString(),
+        blockNumber: receipt.blockNumber
+          ? BigInt(receipt.blockNumber)
+          : undefined
+      });
+    } catch {
+      continue;
     }
+  }
+
+  return buys;
+}
+
+export async function cleanupOldBuyAlerts(
+  groupId: string,
+  days = 30
+) {
+  const cutoff = new Date(
+    Date.now() -
+      days * 24 * 60 * 60 * 1000
   );
 
-  /*
-   * Whale threshold
-   */
-
-  bot.command(
-    "buybot_whale",
-    async (ctx: any) => {
-      if (!ctx.chat) {
-        return;
+  return prisma.buyAlert.deleteMany({
+    where: {
+      groupId,
+      timestamp: {
+        lt: cutoff
       }
-
-      const value =
-        Number(
-          ctx.message.text
-            .split(/\s+/)[1]
-        );
-
-      if (
-        !Number.isFinite(value) ||
-        value <= 0
-      ) {
-        await ctx.reply(
-          "Usage:\n/buybot_whale 2"
-        );
-
-        return;
-      }
-
-      const group =
-        await prisma.group.findUnique({
-          where: {
-            telegramId:
-              String(ctx.chat.id)
-          }
-        });
-
-      if (!group) {
-        return;
-      }
-
-      await prisma.group.update({
-        where: {
-          id: group.id
-        },
-        data: {
-          buyBotWhaleEth:
-            value
-        }
-      });
-
-      await ctx.reply(
-        `🐋 Whale threshold set to ${value} ETH.`
-      );
     }
-  );
+  });
 }
