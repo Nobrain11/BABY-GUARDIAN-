@@ -17,42 +17,22 @@ export const config = {
 
   redisUrl: required("REDIS_URL"),
 
+  robinhoodRpcUrl: required("ROBINHOOD_RPC_URL"),
+
+  babyTokenAddress: required("BABY_TOKEN_ADDRESS"),
+
   port: Number(process.env.PORT || 3000),
 
   dashboardSecret: required("DASHBOARD_SECRET"),
 
-  logChatId:
-    process.env.LOG_CHAT_ID || "",
+  logChatId: process.env.LOG_CHAT_ID || "",
 
-  adminIds:
-    (process.env.ADMIN_IDS || "")
-      .split(",")
-      .map((id) => id.trim())
-      .filter(Boolean),
+  adminIds: (process.env.ADMIN_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
 
-  // --------------------------------------------------
-  // ROBINHOOD CHAIN
-  // --------------------------------------------------
-
-  rpcUrl: required("ROBINHOOD_RPC_URL"),
-
-  chainId: Number(
-    process.env.ROBINHOOD_CHAIN_ID || "4663"
-  ),
-
-  babyTokenAddress: required(
-    "BABY_TOKEN_ADDRESS"
-  ),
-
-  // --------------------------------------------------
-  // BUY BOT
-  // --------------------------------------------------
-
-  buyBotPollIntervalMs: Number(
-    process.env.BUYBOT_POLL_INTERVAL_MS || "3000"
-  ),
-
-  explorerUrl:
+  robinhoodExplorerUrl:
     process.env.ROBINHOOD_EXPLORER_URL ||
-    ""
+    "https://explorer.mainnet.chain.robinhood.com"
 };
